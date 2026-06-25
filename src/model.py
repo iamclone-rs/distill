@@ -93,7 +93,10 @@ class CustomCLIP(nn.Module):
     ):
         super().__init__()
         self.cfg = cfg
-        clip_model.apply(freeze_all_but_ln)
+        if not getattr(cfg, "train_full_student", False):
+            clip_model.apply(freeze_all_but_ln)
+        else:
+            print("[Student] train_full_student=True -> visual student encoders are fully trainable")
         clip_model_distill.apply(freeze_all_but_ln)
         self.dtype = clip_model.dtype
         self.prompt_learner_photo = MultiModalPromptLearner(cfg, clip_model_distill, type='photo')
