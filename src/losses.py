@@ -7,46 +7,35 @@ from torch.nn import functional as F
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def relational_kd_loss(student_feat: torch.Tensor, teacher_feat: torch.Tensor, temperature: float = 2.0) -> torch.Tensor:
+def relational_kd_loss(
+    student_feat: torch.Tensor,
+    teacher_feat: torch.Tensor,
+    temperature: float = 2.0,
+) -> torch.Tensor:
     """
-    Relational Knowledge Distillation (RKD) — dimension agnostic.
+    Relational Knowledge Distillation — dimension-agnostic.
+    Match phân phối pairwise cosine similarity (B×B) giữa student và teacher
+    qua KL divergence → không yêu cầu D_student == D_teacher.
 
-    Thay vì ép student match trực tiếp teacher features (yêu cầu cùng dim),
-    RKD học cấu trúc tương quan pairwise giữa các sample trong batch.
-
-    Cụ thể: match phân phối softmax của ma trận cosine similarity (B×B)
-    giữa student và teacher qua KL divergence.
-
-    Args:
-        student_feat : (B, D_s) — features của student (vd: 512-dim)
-        teacher_feat : (B, D_t) — features của teacher (vd: 1024-dim), không cần D_s == D_t
-        temperature  : scale similarity trước softmax (giá trị lớn → softer distribution)
-
-    Returns:
-        Scalar loss.
+    student_feat : (B, D_s)  — e.g. 512-dim
+    teacher_feat : (B, D_t)  — e.g. 1024-dim (DFN5B)
     """
-    # Normalize về unit sphere trước khi tính cosine similarity
     s = F.normalize(student_feat.float(), dim=-1)  # (B, D_s)
     t = F.normalize(teacher_feat.float(), dim=-1)  # (B, D_t)
-
     B = s.shape[0]
 
-    # Pairwise cosine similarity matrices — cùng shape (B, B) dù D_s ≠ D_t
-    sim_s = (s @ s.T) / temperature  # (B, B)
-    sim_t = (t @ t.T) / temperature  # (B, B)
+    sim_s = (s @ s.T) / temperature   # (B, B)
+    sim_t = (t @ t.T) / temperature   # (B, B)
 
-    # Loại bỏ diagonal (self-similarity = 1, không mang thông tin)
+    # Bỏ diagonal (self-similarity không mang thông tin)
     mask = ~torch.eye(B, dtype=torch.bool, device=s.device)
-    sim_s_off = sim_s[mask].view(B, B - 1)  # (B, B-1)
-    sim_t_off = sim_t[mask].view(B, B - 1)  # (B, B-1)
+    p_t    = F.softmax(    sim_t[mask].view(B, B - 1), dim=-1)
+    log_ps = F.log_softmax(sim_s[mask].view(B, B - 1), dim=-1)
 
-    # Teacher distribution: softmax trên hàng — học "ai gần ai"
-    p_t = F.softmax(sim_t_off, dim=-1)           # (B, B-1)
-    # Student log-distribution
-    log_p_s = F.log_softmax(sim_s_off, dim=-1)   # (B, B-1)
+    return F.kl_div(log_ps, p_t, reduction='batchmean')
 
-    # KL(teacher || student) — student học để match teacher's relational structure
-    return F.kl_div(log_p_s, p_t, reduction='batchmean')
+
+
 
 def cross_loss(feature_1, feature_2, args):
     labels = torch.cat([torch.arange(len(feature_1)) for _ in range(2)], dim=0)
@@ -113,15 +102,17 @@ def loss_fn(args, model, features, mode='train'):
     loss_ce_photo = F.cross_entropy(pos_logits, label)
     loss_ce_sk = F.cross_entropy(sk_logits, label)
     loss_cls = loss_ce_photo + loss_ce_sk
-    
-    # Nếu teacher (DFN5B 1024-dim) và student (512-dim) khác dimension
-    # → dùng Relational KD (dimension-agnostic) thay cross_loss
+
+    # Lựa chọn distill loss:
+    # - clip32 teacher (cùng dim 512) → cross_loss (contrastive, scale ~2–4)
+    # - dfn5b  teacher (1024-dim)     → relational_kd_loss (KL, scale ~0.01–0.1)
+    #   ⇒ lambda_distill cần được nhân lận để bù lại scale nhỏ của RKD
     if photo_aug_features.shape[-1] != photo_features.shape[-1]:
         loss_distill_photo = relational_kd_loss(photo_features, photo_aug_features)
         loss_distill_sk    = relational_kd_loss(sk_features,    sk_aug_features)
     else:
         loss_distill_photo = cross_loss(photo_features, photo_aug_features, args)
-        loss_distill_sk    = cross_loss(sk_features,    sk_aug_features, args)
+        loss_distill_sk    = cross_loss(sk_features,    sk_aug_features,    args)
     
     # loss_distill_photo = F.mse_loss(photo_features, photo_aug_features)
     # loss_distill_sk = F.mse_loss(sk_features, sk_aug_features)
@@ -144,10 +135,16 @@ def loss_fn(args, model, features, mode='train'):
     
     nt_xent_loss = nt_xent(photo_features, sk_features)
     
+    # lambda_distill: điều chỉnh trọng số loss distillation
+    # - clip32 teacher: lambda_distill=1.0 là hợp lý (scale tương đương cls/nt_xent)
+    # - dfn5b  teacher: lambda_distill cần lớn hơn (~10–50) vì RKD scale nhỏ hơn
+    #   gợi ý: bắt đầu với lambda_distill=10.0 khi dùng dfn5b
+    lambda_distill = getattr(args, 'lambda_distill', 1.0)
+    
     total_loss = (
         loss_cls \
         + loss_triplet \
-        + loss_distill \
+        + lambda_distill * loss_distill \
         + nt_xent_loss
     )
     

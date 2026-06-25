@@ -64,10 +64,23 @@ if __name__ == "__main__":
     parser.add_argument('--progress', type=bool, default=False)
     parser.add_argument('--visualize', type=bool, default=False)
     parser.add_argument('--gzs', type=bool, default=False)
-    parser.add_argument('--use_strong_teacher', type=bool, default=False,
-                        help='Dùng DFN5B-CLIP-H/14 làm teacher thay ViT-B/32 (yêu cầu open-clip-torch)')
+    parser.add_argument('--teacher', type=str, default='clip32',
+                        choices=['clip32', 'dfn5b'],
+                        help=(
+                            "Teacher model cho distillation:\n"
+                            "  clip32 → CLIP ViT-B/32 (mặc định, cross_loss)\n"
+                            "  dfn5b  → DFN5B-CLIP-H/14 1024-dim (RKD loss, cần open-clip-torch)"
+                        ))
+    parser.add_argument('--lambda_distill', type=float, default=1.0,
+                        help=(
+                            "Trọng số cho distillation loss:\n"
+                            "  clip32: 1.0 (mặc định, scale tương đương cls/nt_xent)\n"
+                            "  dfn5b:  khuyến nghị 10.0–50.0 (RKD scale nhỏ hơn ~10–50x)"
+                        ))
     
     parser.add_argument('--exp_name', type=str, default='Co_prompt')
+
+
     
     args = parser.parse_args()
     logger = TensorBoardLogger('tb_logs', name=args.exp_name)

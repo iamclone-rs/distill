@@ -5,14 +5,13 @@ import torch.nn as nn
 import pytorch_lightning as pl
 from torch.nn import functional as F
 from collections import defaultdict
-from torchmetrics.functional import retrieval_average_precision
+from torchmetrics.functional import retrieval_average_precision #, retrieval_precision
 
 try:
     import open_clip
     OPEN_CLIP_AVAILABLE = True
 except ImportError:
     OPEN_CLIP_AVAILABLE = False
-    print("[WARNING] open_clip không được cài. Chạy: pip install open-clip-torch")
 
 from src.coprompt import MultiModalPromptLearner, Adapter, TextEncoder
 from src.utils import load_clip_to_cpu, get_all_categories, retrieval_precision, visualize_tsne
@@ -21,9 +20,56 @@ from src.data_config import VISUALIZE_CLASSES, UNSEEN_CLASSES
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# ---------------------------------------------------------------------------
+# Teacher loader
+# ---------------------------------------------------------------------------
+_TEACHER_REGISTRY = {
+    # key         : (open_clip model name,    pretrained tag)
+    "dfn5b"       : ("ViT-H-14-quickgelu",   "dfn5b"),
+}
+
+def _load_teacher(args):
+    """
+    Trả về strong_teacher model (frozen) hoặc None.
+
+    args.teacher:
+        'clip32'  → None  (dùng clip_model_distill ViT-B/32, hành vi gốc)
+        'dfn5b'   → DFN5B-CLIP-H/14 (1024-dim, frozen, via open_clip)
+    """
+    teacher_key = getattr(args, "teacher", "clip32")
+
+    if teacher_key == "clip32":
+        print("[Teacher] clip32 (ViT-B/32) — hành vi gốc, cross_loss")
+        return None
+
+    if teacher_key not in _TEACHER_REGISTRY:
+        raise ValueError(
+            f"Teacher '{teacher_key}' không hợp lệ. "
+            f"Chọn một trong: clip32, {', '.join(_TEACHER_REGISTRY)}"
+        )
+
+    if not OPEN_CLIP_AVAILABLE:
+        raise ImportError(
+            f"Teacher '{teacher_key}' yêu cầu open_clip. "
+            "Cài bằng: pip install open-clip-torch"
+        )
+
+    model_name, pretrained = _TEACHER_REGISTRY[teacher_key]
+    print(f"[Teacher] Đang load {teacher_key} ({model_name}, pretrained={pretrained})...")
+    teacher, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
+    teacher.eval()
+    for p in teacher.parameters():
+        p.requires_grad = False
+    teacher = teacher.to(device)
+    print(f"[Teacher] {teacher_key} đã sẵn sàng (frozen, output 1024-dim) → RKD loss")
+    return teacher
+
+# ---------------------------------------------------------------------------
+
 def freeze_model(m):
     m.requires_grad_(False)
     
+
 def freeze_all_but_bn(m):
     if not isinstance(m, torch.nn.LayerNorm):
         if hasattr(m, 'weight') and m.weight is not None:
@@ -40,31 +86,25 @@ class CustomCLIP(nn.Module):
         clip_model.apply(freeze_all_but_bn)
         clip_model_distill.apply(freeze_all_but_bn)
         self.dtype = clip_model.dtype
-        # Role 1: PromptLearner dùng clip_model_distill (ViT-B/32) — giữ nguyên
         self.prompt_learner_photo = MultiModalPromptLearner(cfg, clip_model_distill, type='photo')
         self.prompt_learner_sketch = MultiModalPromptLearner(cfg, clip_model_distill, type='sketch')
         
         self.ph_encoder = copy.deepcopy(clip_model.visual)
         self.sk_encoder = copy.deepcopy(clip_model.visual)
-        # Role 2: TextEncoder dùng clip_model_distill (ViT-B/32) — giữ nguyên
         self.text_encoder = TextEncoder(clip_model_distill, cfg)
         self.logit_scale = clip_model.logit_scale
         
         self.adapter_photo = Adapter(512, 4).to(clip_model.dtype)
         self.adapter_text = Adapter(512, 4).to(clip_model.dtype)
         
-        # Role 3 (distillation image encoding):
-        # Nếu có strong_teacher (DFN5B-CLIP-H/14, 1024-dim) → dùng nó
-        # Nếu không có → fallback về clip_model_distill (ViT-B/32, 512-dim)
+        # strong_teacher=None  → clip32 (giữ nguyên hành vi gốc)
+        # strong_teacher=<model> → DFN5B, output 1024-dim, dùng RKD loss
         if strong_teacher is not None:
-            self.model_distill = strong_teacher  # DFN5B: output 1024-dim
+            self.model_distill = strong_teacher
             self._use_strong_teacher = True
-            print("[CustomCLIP] Dùng DFN5B-CLIP-H/14 làm teacher → RKD loss")
         else:
-            self.model_distill = clip_model_distill  # fallback ViT-B/32: output 512-dim
+            self.model_distill = clip_model_distill
             self._use_strong_teacher = False
-            print("[CustomCLIP] Dùng clip_model_distill (ViT-B/32) làm teacher → cross_loss")
-
         self.image_adapter_m = 0.1
         self.text_adapter_m = 0.1
         self.saved_features = defaultdict(lambda: {"sketch": [], "photo": []})
@@ -145,20 +185,12 @@ class CustomCLIP(nn.Module):
         sk_logits, sk_feature_norm, sk_feature = self.get_logits(sk_tensor, classnames, type='sketch')
         _, neg_feature, _ = self.get_logits(neg_tensor, classnames)
         
-        # Role 3: encode augmented views bằng teacher (DFN5B hoặc fallback ViT-B/32)
-        # Teacher luôn frozen — không cần gradient
-        with torch.no_grad():
-            if self._use_strong_teacher:
-                # DFN5B dùng float32; augmented tensors đã ở 224×224 (tương thích)
-                photo_aug_features = self.model_distill.encode_image(
-                    photo_aug_tensor.float()
-                )  # (B, 1024)
-                sk_aug_features = self.model_distill.encode_image(
-                    sk_aug_tensor.float()
-                )  # (B, 1024)
-            else:
-                photo_aug_features = self.model_distill.encode_image(photo_aug_tensor)  # (B, 512)
-                sk_aug_features = self.model_distill.encode_image(sk_aug_tensor)        # (B, 512)
+        photo_aug_features = self.model_distill.encode_image(
+            photo_aug_tensor.float() if self._use_strong_teacher else photo_aug_tensor
+        )
+        sk_aug_features = self.model_distill.encode_image(
+            sk_aug_tensor.float() if self._use_strong_teacher else sk_aug_tensor
+        )
             
         return photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
             neg_feature, label, pos_logits, sk_logits, photo_feature, sk_feature
@@ -185,23 +217,8 @@ class ZS_SBIR(pl.LightningModule):
         
         self.distance_fn = lambda x, y: F.cosine_similarity(x, y)
         self.best_metric = 1e-3
-        
-        # Load DFN5B-CLIP-H/14 làm strong teacher (nếu flag bật và open_clip có sẵn)
-        strong_teacher = None
-        if getattr(args, 'use_strong_teacher', False):
-            if not OPEN_CLIP_AVAILABLE:
-                raise ImportError("Cần cài open_clip: pip install open-clip-torch")
-            print("[ZS_SBIR] Đang load DFN5B-CLIP-H/14 (ViT-H-14-quickgelu, dfn5b)...")
-            strong_teacher, _, _ = open_clip.create_model_and_transforms(
-                'ViT-H-14-quickgelu', pretrained='dfn5b'
-            )
-            strong_teacher.eval()
-            # Freeze hoàn toàn — không vào optimizer
-            for p in strong_teacher.parameters():
-                p.requires_grad = False
-            strong_teacher = strong_teacher.to(device)
-            print("[ZS_SBIR] DFN5B teacher đã load xong (output: 1024-dim, frozen)")
 
+        strong_teacher = _load_teacher(args)
         self.model = CustomCLIP(
             cfg=args,
             clip_model=clip_model,
