@@ -61,9 +61,10 @@ if __name__ == "__main__":
     parser.add_argument('--use_adapt_txt', type=bool, default=True)
     parser.add_argument('--use_co_sk', type=bool, default=True)
     parser.add_argument('--use_co_ph', type=bool, default=True)
-    parser.add_argument('--progress', type=bool, default=False)
-    parser.add_argument('--visualize', type=bool, default=False)
-    parser.add_argument('--gzs', type=bool, default=False)
+    parser.add_argument('--progress', action='store_true', default=False,
+                        help='Hiện tqdm progress bar trong lúc train')
+    parser.add_argument('--visualize', action='store_true', default=False)
+    parser.add_argument('--gzs', action='store_true', default=False)
     parser.add_argument('--teacher', type=str, default='clip32',
                         choices=['clip32', 'dfn5b'],
                         help=(
