@@ -70,12 +70,10 @@ def freeze_model(m):
     m.requires_grad_(False)
     
 
-def freeze_all_but_bn(m):
-    if not isinstance(m, torch.nn.LayerNorm):
-        if hasattr(m, 'weight') and m.weight is not None:
-            m.weight.requires_grad_(False)
-        if hasattr(m, 'bias') and m.bias is not None:
-            m.bias.requires_grad_(False)
+def freeze_all_but_ln(m):
+    train_ln = isinstance(m, torch.nn.LayerNorm)
+    for p in m.parameters(recurse=False):
+        p.requires_grad_(train_ln)
 
 
 def unfreeze_layernorm_params(m):
@@ -93,8 +91,8 @@ class CustomCLIP(nn.Module):
     ):
         super().__init__()
         self.cfg = cfg
-        clip_model.apply(freeze_all_but_bn)
-        clip_model_distill.apply(freeze_all_but_bn)
+        clip_model.apply(freeze_all_but_ln)
+        clip_model_distill.apply(freeze_all_but_ln)
         self.dtype = clip_model.dtype
         self.prompt_learner_photo = MultiModalPromptLearner(cfg, clip_model_distill, type='photo')
         self.prompt_learner_sketch = MultiModalPromptLearner(cfg, clip_model_distill, type='sketch')
