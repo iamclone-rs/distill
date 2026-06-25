@@ -94,9 +94,43 @@ def nt_xent(features_view1: torch.Tensor, features_view2: torch.Tensor):
     return loss
 
 
+def projected_kd_loss(
+    student_feat: torch.Tensor,
+    teacher_feat: torch.Tensor,
+    args,
+) -> torch.Tensor:
+    """
+    Strong cross-dim KD after projecting student features into teacher space.
+    Combines sample-wise cosine, batch contrastive alignment, and RKD geometry.
+    """
+    s = F.normalize(student_feat.float(), dim=-1)
+    t = F.normalize(teacher_feat.float(), dim=-1)
+    temperature = getattr(args, "temperature", 0.07)
+    rkd_weight = getattr(args, "rkd_weight", 0.5)
+    labels = torch.arange(s.shape[0], device=s.device)
+
+    loss_cos = 1.0 - (s * t).sum(dim=-1).mean()
+    logits_st = (s @ t.T) / temperature
+    logits_ts = (t @ s.T) / temperature
+    loss_contrast = 0.5 * (
+        F.cross_entropy(logits_st, labels) +
+        F.cross_entropy(logits_ts, labels)
+    )
+    loss_rkd = relational_kd_loss(student_feat, teacher_feat)
+
+    return loss_cos + loss_contrast + rkd_weight * loss_rkd
+
+
 def loss_fn(args, model, features, mode='train'):
     photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
-        neg_features, label, pos_logits, sk_logits, photo_features, sk_features = features
+        neg_features, label, pos_logits, sk_logits, photo_features, sk_features = features[:10]
+
+    if len(features) >= 13:
+        photo_distill_features, sk_distill_features, neg_distill_features = features[10:13]
+    else:
+        photo_distill_features = photo_features
+        sk_distill_features = sk_features
+        neg_distill_features = neg_features
 
     label = label.to(pos_logits.device)
     loss_ce_photo = F.cross_entropy(pos_logits, label)
@@ -107,7 +141,10 @@ def loss_fn(args, model, features, mode='train'):
     # - clip32 teacher (cùng dim 512) → cross_loss (contrastive, scale ~2–4)
     # - dfn5b  teacher (1024-dim)     → relational_kd_loss (KL, scale ~0.01–0.1)
     #   ⇒ lambda_distill cần được nhân lận để bù lại scale nhỏ của RKD
-    if photo_aug_features.shape[-1] != photo_features.shape[-1]:
+    if getattr(args, "use_distill_proj", False):
+        loss_distill_photo = projected_kd_loss(photo_distill_features, photo_aug_features, args)
+        loss_distill_sk    = projected_kd_loss(sk_distill_features,    sk_aug_features,    args)
+    elif photo_aug_features.shape[-1] != photo_features.shape[-1]:
         loss_distill_photo = relational_kd_loss(photo_features, photo_aug_features)
         loss_distill_sk    = relational_kd_loss(sk_features,    sk_aug_features)
     else:
@@ -131,9 +168,18 @@ def loss_fn(args, model, features, mode='train'):
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(
             distance_function=distance_fn, margin=0.2)
-    loss_triplet = triplet(sk_feature_norm, photo_features_norm, neg_features)
+    if getattr(args, "infer_with_distill_proj", False):
+        photo_triplet_features = F.normalize(photo_distill_features.float(), dim=-1)
+        sk_triplet_features = F.normalize(sk_distill_features.float(), dim=-1)
+        neg_triplet_features = F.normalize(neg_distill_features.float(), dim=-1)
+        loss_triplet = triplet(sk_triplet_features, photo_triplet_features, neg_triplet_features)
+    else:
+        loss_triplet = triplet(sk_feature_norm, photo_features_norm, neg_features)
     
-    nt_xent_loss = nt_xent(photo_features, sk_features)
+    if getattr(args, "use_distill_proj", False):
+        nt_xent_loss = nt_xent(photo_distill_features, sk_distill_features)
+    else:
+        nt_xent_loss = nt_xent(photo_features, sk_features)
     
     # lambda_distill: điều chỉnh trọng số loss distillation
     # - clip32 teacher: lambda_distill=1.0 là hợp lý (scale tương đương cls/nt_xent)

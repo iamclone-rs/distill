@@ -101,6 +101,12 @@ if __name__ == "__main__":
                             "  clip32: 1.0 (mặc định, scale tương đương cls/nt_xent)\n"
                             "  dfn5b:  khuyến nghị 10.0–50.0 (RKD scale nhỏ hơn ~10–50x)"
                         ))
+    parser.add_argument('--use_distill_proj', action='store_true', default=False,
+                        help='Thêm linear projection student feature sang teacher feature dim để distill.')
+    parser.add_argument('--infer_with_distill_proj', action='store_true', default=False,
+                        help='Dùng projected feature cho validation/inference retrieval.')
+    parser.add_argument('--rkd_weight', type=float, default=0.5,
+                        help='Trọng số RKD phụ trong projected distillation loss.')
     parser.add_argument('--train_teacher_ln', action='store_true', default=False,
                         help=(
                             "Train visual LayerNorm của teacher bằng sketch teacher branch. "

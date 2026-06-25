@@ -71,9 +71,11 @@ def freeze_model(m):
     
 
 def freeze_all_but_ln(m):
-    train_ln = isinstance(m, torch.nn.LayerNorm)
-    for p in m.parameters(recurse=False):
-        p.requires_grad_(train_ln)
+    if not isinstance(m, torch.nn.LayerNorm):
+        if hasattr(m, 'weight') and m.weight is not None:
+            m.weight.requires_grad_(False)
+        if hasattr(m, 'bias') and m.bias is not None:
+            m.bias.requires_grad_(False)
 
 
 def unfreeze_layernorm_params(m):
@@ -113,6 +115,15 @@ class CustomCLIP(nn.Module):
         else:
             self.model_distill = clip_model_distill
             self._use_strong_teacher = False
+        self._use_distill_proj = getattr(cfg, "use_distill_proj", False)
+        self._infer_with_distill_proj = getattr(cfg, "infer_with_distill_proj", False)
+        self._distill_proj_dim = 1024 if self._use_strong_teacher else 512
+        if self._use_distill_proj:
+            self.distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
+            print(
+                "[Distill] use_distill_proj=True -> "
+                f"student feature 512 -> {self._distill_proj_dim}"
+            )
         self._train_teacher_ln = getattr(cfg, "train_teacher_ln", False)
         if self._train_teacher_ln:
             teacher_visual = getattr(self.model_distill, "visual", self.model_distill)
@@ -143,6 +154,11 @@ class CustomCLIP(nn.Module):
             txt_guided_prompts
         )
     
+    def project_distill_feature(self, feature):
+        if not self._use_distill_proj:
+            return feature
+        return self.distill_proj(feature.type(self.dtype))
+
     def get_logits(self, img_tensor, classnames, type='photo'):
         if type=='photo':
             prompt_learner = self.prompt_learner_photo
@@ -199,7 +215,7 @@ class CustomCLIP(nn.Module):
         photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, neg_tensor, label = x
         pos_logits, photo_features_norm, photo_feature = self.get_logits(photo_tensor, classnames)
         sk_logits, sk_feature_norm, sk_feature = self.get_logits(sk_tensor, classnames, type='sketch')
-        _, neg_feature, _ = self.get_logits(neg_tensor, classnames)
+        _, neg_feature, neg_raw_feature = self.get_logits(neg_tensor, classnames)
         
         if self._train_teacher_ln:
             # Keep photo teacher target fixed, but let sketch target update
@@ -229,11 +245,19 @@ class CustomCLIP(nn.Module):
             photo_aug_features = aug_feats[:B]   # (B, D)
             sk_aug_features    = aug_feats[B:]   # (B, D)
             
+        photo_distill_feature = self.project_distill_feature(photo_feature)
+        sk_distill_feature = self.project_distill_feature(sk_feature)
+        neg_distill_feature = self.project_distill_feature(neg_raw_feature)
+            
         return photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
-            neg_feature, label, pos_logits, sk_logits, photo_feature, sk_feature
+            neg_feature, label, pos_logits, sk_logits, photo_feature, sk_feature, \
+            photo_distill_feature, sk_distill_feature, neg_distill_feature
         
     def extract_feature(self, image, classname, type='photo'):
-        _, feature, _ = self.get_logits(image, classnames=classname, type=type)
+        _, feature, raw_feature = self.get_logits(image, classnames=classname, type=type)
+        if self._infer_with_distill_proj:
+            feature = self.project_distill_feature(raw_feature)
+            feature = feature / feature.norm(dim=-1, keepdim=True)
         return feature
             
 class ZS_SBIR(pl.LightningModule):
