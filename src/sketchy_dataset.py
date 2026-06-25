@@ -30,7 +30,7 @@ class TrainDataset(torch.utils.data.Dataset):
         self.args = args
         self.proportion = proportion
         self.transform1 = normal_transform()
-        self.transform2 = aumented_transform()
+        self.transform2 = normal_transform() if getattr(args, "no_aug", False) else aumented_transform()
         
         unseen_classes = UNSEEN_CLASSES[self.args.dataset]
 

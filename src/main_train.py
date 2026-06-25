@@ -86,6 +86,8 @@ if __name__ == "__main__":
     parser.add_argument('--use_co_ph', type=bool, default=True)
     parser.add_argument('--progress', action='store_true', default=False,
                         help='Hiện tqdm progress bar trong lúc train')
+    parser.add_argument('--no_aug', action='store_true', default=False,
+                        help='Tắt augmentation cho photo_aug/sketch_aug, dùng transform thường.')
     parser.add_argument('--visualize', action='store_true', default=False)
     parser.add_argument('--gzs', action='store_true', default=False)
     parser.add_argument('--teacher', type=str, default='clip32',
