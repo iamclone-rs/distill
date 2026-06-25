@@ -7,13 +7,16 @@ from torchvision import transforms
 from PIL import Image, ImageOps
 from src.data_config import UNSEEN_CLASSES, GENERALIZED_CLASSES, VISUALIZE_CLASSES
 
+CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
+CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
+
 def aumented_transform():
     transform_list = [
         transforms.RandomResizedCrop(224, scale=(0.85, 1.0)),
         transforms.RandomHorizontalFlip(0.5),
         transforms.ToTensor(),
         transforms.RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD)
     ]
     return transforms.Compose(transform_list)
 
@@ -21,7 +24,7 @@ def normal_transform():
     dataset_transforms = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD)
     ])
     return dataset_transforms
 
