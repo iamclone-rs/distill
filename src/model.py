@@ -86,6 +86,16 @@ def unfreeze_layernorm_params(m):
                 p.requires_grad_(True)
                 num_params += p.numel()
     return num_params
+
+
+def unfreeze_attention_out_proj(m):
+    num_params = 0
+    for module in m.modules():
+        if isinstance(module, nn.MultiheadAttention):
+            for p in module.out_proj.parameters():
+                p.requires_grad_(True)
+                num_params += p.numel()
+    return num_params
             
 class CustomCLIP(nn.Module):
     def __init__(
@@ -104,6 +114,13 @@ class CustomCLIP(nn.Module):
         
         self.ph_encoder = copy.deepcopy(clip_model.visual)
         self.sk_encoder = copy.deepcopy(clip_model.visual)
+        if getattr(cfg, "train_attn_out_proj", False):
+            num_ph_params = unfreeze_attention_out_proj(self.ph_encoder)
+            num_sk_params = unfreeze_attention_out_proj(self.sk_encoder)
+            print(
+                "[Student] train_attn_out_proj=True -> "
+                f"unfreeze {num_ph_params + num_sk_params} attention out_proj params"
+            )
         self.text_encoder = TextEncoder(clip_model_distill, cfg)
         self.logit_scale = clip_model.logit_scale
         

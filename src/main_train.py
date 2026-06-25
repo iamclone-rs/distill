@@ -86,6 +86,8 @@ if __name__ == "__main__":
     parser.add_argument('--use_co_ph', type=bool, default=True)
     parser.add_argument('--train_full_student', action='store_true', default=False,
                         help='Không freeze student CLIP visual encoders; fine-tune toàn bộ student.')
+    parser.add_argument('--train_attn_out_proj', action='store_true', default=False,
+                        help='Mở thêm attention out_proj trong student visual encoders.')
     parser.add_argument('--progress', action='store_true', default=False,
                         help='Hiện tqdm progress bar trong lúc train')
     parser.add_argument('--no_aug', action='store_true', default=False,
