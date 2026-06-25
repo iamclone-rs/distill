@@ -102,11 +102,13 @@ if __name__ == "__main__":
                             "  dfn5b:  khuyến nghị 10.0–50.0 (RKD scale nhỏ hơn ~10–50x)"
                         ))
     parser.add_argument('--use_distill_proj', action='store_true', default=False,
-                        help='Thêm linear projection student feature sang teacher feature dim để distill.')
+                        help='Thêm linear projection student sang teacher dim rồi distill bằng cross_loss InfoNCE.')
+    parser.add_argument('--distill_photo_only', action='store_true', default=False,
+                        help='Chỉ distill nhánh photo từ teacher; sketch học qua CE/triplet/NT-Xent.')
     parser.add_argument('--infer_with_distill_proj', action='store_true', default=False,
                         help='Dùng projected feature cho validation/inference retrieval.')
     parser.add_argument('--rkd_weight', type=float, default=0.5,
-                        help='Trọng số RKD phụ trong projected distillation loss.')
+                        help='Trọng số RKD phụ nếu dùng projected_kd_loss thử nghiệm.')
     parser.add_argument('--train_teacher_ln', action='store_true', default=False,
                         help=(
                             "Train visual LayerNorm của teacher bằng sketch teacher branch. "

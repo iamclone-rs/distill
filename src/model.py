@@ -117,6 +117,7 @@ class CustomCLIP(nn.Module):
             self._use_strong_teacher = False
         self._use_distill_proj = getattr(cfg, "use_distill_proj", False)
         self._infer_with_distill_proj = getattr(cfg, "infer_with_distill_proj", False)
+        self._distill_photo_only = getattr(cfg, "distill_photo_only", False)
         self._distill_proj_dim = 1024 if self._use_strong_teacher else 512
         if self._use_distill_proj:
             self.distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
@@ -217,7 +218,12 @@ class CustomCLIP(nn.Module):
         sk_logits, sk_feature_norm, sk_feature = self.get_logits(sk_tensor, classnames, type='sketch')
         _, neg_feature, neg_raw_feature = self.get_logits(neg_tensor, classnames)
         
-        if self._train_teacher_ln:
+        if self._distill_photo_only:
+            teacher_input = photo_aug_tensor.float() if self._use_strong_teacher else photo_aug_tensor
+            with torch.no_grad():
+                photo_aug_features = self.model_distill.encode_image(teacher_input)
+            sk_aug_features = photo_aug_features
+        elif self._train_teacher_ln:
             # Keep photo teacher target fixed, but let sketch target update
             # visual LayerNorm params for sketch-domain adaptation.
             if self._use_strong_teacher:

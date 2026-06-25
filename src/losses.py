@@ -138,12 +138,12 @@ def loss_fn(args, model, features, mode='train'):
     loss_cls = loss_ce_photo + loss_ce_sk
 
     # Lựa chọn distill loss:
-    # - clip32 teacher (cùng dim 512) → cross_loss (contrastive, scale ~2–4)
-    # - dfn5b  teacher (1024-dim)     → relational_kd_loss (KL, scale ~0.01–0.1)
-    #   ⇒ lambda_distill cần được nhân lận để bù lại scale nhỏ của RKD
+    # - clip32 teacher (cùng dim 512) → cross_loss InfoNCE
+    # - dfn5b + use_distill_proj      → Linear 512->1024 rồi cross_loss InfoNCE
+    # - dfn5b không projection        → relational_kd_loss vì khác dim
     if getattr(args, "use_distill_proj", False):
-        loss_distill_photo = projected_kd_loss(photo_distill_features, photo_aug_features, args)
-        loss_distill_sk    = projected_kd_loss(sk_distill_features,    sk_aug_features,    args)
+        loss_distill_photo = cross_loss(photo_distill_features, photo_aug_features, args)
+        loss_distill_sk    = cross_loss(sk_distill_features,    sk_aug_features,    args)
     elif photo_aug_features.shape[-1] != photo_features.shape[-1]:
         loss_distill_photo = relational_kd_loss(photo_features, photo_aug_features)
         loss_distill_sk    = relational_kd_loss(sk_features,    sk_aug_features)
@@ -163,7 +163,10 @@ def loss_fn(args, model, features, mode='train'):
     # loss_distill_photo = F.l1_loss(photo_features, photo_aug_features)
     # loss_distill_sk = F.l1_loss(sk_features, sk_aug_features)
     
-    loss_distill = loss_distill_sk + loss_distill_photo 
+    if getattr(args, "distill_photo_only", False):
+        loss_distill = loss_distill_photo
+    else:
+        loss_distill = loss_distill_sk + loss_distill_photo 
     
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(
@@ -176,7 +179,7 @@ def loss_fn(args, model, features, mode='train'):
     else:
         loss_triplet = triplet(sk_feature_norm, photo_features_norm, neg_features)
     
-    if getattr(args, "use_distill_proj", False):
+    if getattr(args, "infer_with_distill_proj", False):
         nt_xent_loss = nt_xent(photo_distill_features, sk_distill_features)
     else:
         nt_xent_loss = nt_xent(photo_features, sk_features)
