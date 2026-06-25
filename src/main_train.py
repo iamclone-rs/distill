@@ -23,9 +23,32 @@ def get_datasets(args):
     val_sketch = ValidDataset(args, mode='sketch')
     val_photo = ValidDataset(args)
 
-    train_loader = DataLoader(dataset=train_dataset, batch_size=args.batch_size, num_workers=args.workers, shuffle=True)
-    val_sketch_loader = DataLoader(dataset=val_sketch, batch_size=args.test_batch_size, num_workers=args.workers, shuffle=False)
-    val_photo_loader = DataLoader(dataset=val_photo, batch_size=args.test_batch_size, num_workers=args.workers, shuffle=False)
+    loader_kwargs = dict(
+        num_workers=args.workers,
+        pin_memory=True,           # Transfer CPU→GPU nhanh hơn (non-blocking)
+        persistent_workers=args.workers > 0,  # Giữ worker sống giữa các epoch
+        prefetch_factor=4 if args.workers > 0 else None,  # Pre-load 4 batch trước
+    )
+
+    train_loader = DataLoader(
+        dataset=train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        drop_last=True,  # Tránh batch lẻ ở cuối gây vấn đề với RKD (cần B>=2)
+        **loader_kwargs,
+    )
+    val_sketch_loader = DataLoader(
+        dataset=val_sketch,
+        batch_size=args.test_batch_size,
+        shuffle=False,
+        **loader_kwargs,
+    )
+    val_photo_loader = DataLoader(
+        dataset=val_photo,
+        batch_size=args.test_batch_size,
+        shuffle=False,
+        **loader_kwargs,
+    )
 
     return train_loader, val_sketch_loader, val_photo_loader
 
@@ -77,6 +100,11 @@ if __name__ == "__main__":
                             "Trọng số cho distillation loss:\n"
                             "  clip32: 1.0 (mặc định, scale tương đương cls/nt_xent)\n"
                             "  dfn5b:  khuyến nghị 10.0–50.0 (RKD scale nhỏ hơn ~10–50x)"
+                        ))
+    parser.add_argument('--train_teacher_ln', action='store_true', default=False,
+                        help=(
+                            "Train visual LayerNorm của teacher bằng sketch teacher branch. "
+                            "Photo teacher target vẫn chạy no_grad."
                         ))
     
     parser.add_argument('--exp_name', type=str, default='Co_prompt')

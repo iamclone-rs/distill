@@ -76,6 +76,16 @@ def freeze_all_but_bn(m):
             m.weight.requires_grad_(False)
         if hasattr(m, 'bias') and m.bias is not None:
             m.bias.requires_grad_(False)
+
+
+def unfreeze_layernorm_params(m):
+    num_params = 0
+    for module in m.modules():
+        if isinstance(module, torch.nn.LayerNorm):
+            for p in module.parameters(recurse=False):
+                p.requires_grad_(True)
+                num_params += p.numel()
+    return num_params
             
 class CustomCLIP(nn.Module):
     def __init__(
@@ -105,6 +115,14 @@ class CustomCLIP(nn.Module):
         else:
             self.model_distill = clip_model_distill
             self._use_strong_teacher = False
+        self._train_teacher_ln = getattr(cfg, "train_teacher_ln", False)
+        if self._train_teacher_ln:
+            teacher_visual = getattr(self.model_distill, "visual", self.model_distill)
+            num_ln_params = unfreeze_layernorm_params(teacher_visual)
+            print(
+                "[Teacher] train_teacher_ln=True -> "
+                f"unfreeze {num_ln_params} visual LayerNorm params for sketch teacher adaptation"
+            )
         self.image_adapter_m = 0.1
         self.text_adapter_m = 0.1
         self.saved_features = defaultdict(lambda: {"sketch": [], "photo": []})
@@ -185,12 +203,33 @@ class CustomCLIP(nn.Module):
         sk_logits, sk_feature_norm, sk_feature = self.get_logits(sk_tensor, classnames, type='sketch')
         _, neg_feature, _ = self.get_logits(neg_tensor, classnames)
         
-        photo_aug_features = self.model_distill.encode_image(
-            photo_aug_tensor.float() if self._use_strong_teacher else photo_aug_tensor
-        )
-        sk_aug_features = self.model_distill.encode_image(
-            sk_aug_tensor.float() if self._use_strong_teacher else sk_aug_tensor
-        )
+        if self._train_teacher_ln:
+            # Keep photo teacher target fixed, but let sketch target update
+            # visual LayerNorm params for sketch-domain adaptation.
+            if self._use_strong_teacher:
+                photo_teacher_input = photo_aug_tensor.float()
+                sketch_teacher_input = sk_aug_tensor.float()
+            else:
+                photo_teacher_input = photo_aug_tensor
+                sketch_teacher_input = sk_aug_tensor
+
+            with torch.no_grad():
+                photo_aug_features = self.model_distill.encode_image(photo_teacher_input)
+            sk_aug_features = self.model_distill.encode_image(sketch_teacher_input)
+        else:
+            # Gộp photo_aug + sketch_aug thành 1 batch → 1 teacher forward pass thay vì 2
+            # Tiết kiệm ~50% thời gian teacher inference (ViT-H/14 rất chậm nếu gọi 2 lần)
+            with torch.no_grad():
+                if self._use_strong_teacher:
+                    aug_cat = torch.cat([photo_aug_tensor, sk_aug_tensor], dim=0).float()
+                    aug_feats = self.model_distill.encode_image(aug_cat)          # (2B, 1024)
+                else:
+                    aug_cat = torch.cat([photo_aug_tensor, sk_aug_tensor], dim=0)
+                    aug_feats = self.model_distill.encode_image(aug_cat)          # (2B, 512)
+            
+            B = photo_aug_tensor.shape[0]
+            photo_aug_features = aug_feats[:B]   # (B, D)
+            sk_aug_features    = aug_feats[B:]   # (B, D)
             
         return photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
             neg_feature, label, pos_logits, sk_logits, photo_feature, sk_feature
