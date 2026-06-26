@@ -111,6 +111,8 @@ if __name__ == "__main__":
                         help='Thêm linear projection student sang teacher dim rồi distill bằng cross_loss InfoNCE.')
     parser.add_argument('--distill_photo_only', action='store_true', default=False,
                         help='Chỉ distill nhánh photo từ teacher; sketch học qua CE/triplet/NT-Xent.')
+    parser.add_argument('--lambda_sketch_distill', type=float, default=0.0,
+                        help='Trọng số sketch distill phụ khi dùng distill_photo_only.')
     parser.add_argument('--distill_text', action='store_true', default=False,
                         help='Distill text features từ teacher text encoder sang student text prompts.')
     parser.add_argument('--lambda_text_distill', type=float, default=1.0,

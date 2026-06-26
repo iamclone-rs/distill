@@ -171,7 +171,8 @@ def loss_fn(args, model, features, mode='train'):
     # loss_distill_sk = F.l1_loss(sk_features, sk_aug_features)
     
     if getattr(args, "distill_photo_only", False):
-        loss_distill = loss_distill_photo
+        lambda_sketch_distill = getattr(args, "lambda_sketch_distill", 0.0)
+        loss_distill = loss_distill_photo + lambda_sketch_distill * loss_distill_sk
     else:
         loss_distill = loss_distill_sk + loss_distill_photo 
 

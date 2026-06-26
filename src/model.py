@@ -281,10 +281,15 @@ class CustomCLIP(nn.Module):
         _, neg_feature, neg_raw_feature = self.get_logits(neg_tensor, classnames)
         
         if self._distill_photo_only:
+            train_sketch_distill = getattr(self.cfg, "lambda_sketch_distill", 0.0) > 0
             teacher_input = photo_aug_tensor.float() if self._use_strong_teacher else photo_aug_tensor
             with torch.no_grad():
                 photo_aug_features = self.model_distill.encode_image(teacher_input)
-            sk_aug_features = photo_aug_features
+                if train_sketch_distill:
+                    sketch_teacher_input = sk_aug_tensor.float() if self._use_strong_teacher else sk_aug_tensor
+                    sk_aug_features = self.model_distill.encode_image(sketch_teacher_input)
+                else:
+                    sk_aug_features = photo_aug_features
         elif self._train_teacher_ln:
             # Keep photo teacher target fixed, but let sketch target update
             # visual LayerNorm params for sketch-domain adaptation.
