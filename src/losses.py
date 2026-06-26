@@ -132,6 +132,13 @@ def loss_fn(args, model, features, mode='train'):
         sk_distill_features = sk_features
         neg_distill_features = neg_features
 
+    if len(features) >= 16:
+        photo_text_distill_features, sk_text_distill_features, teacher_text_features = features[13:16]
+    else:
+        photo_text_distill_features = None
+        sk_text_distill_features = None
+        teacher_text_features = None
+
     label = label.to(pos_logits.device)
     loss_ce_photo = F.cross_entropy(pos_logits, label)
     loss_ce_sk = F.cross_entropy(sk_logits, label)
@@ -167,6 +174,18 @@ def loss_fn(args, model, features, mode='train'):
         loss_distill = loss_distill_photo
     else:
         loss_distill = loss_distill_sk + loss_distill_photo 
+
+    loss_text_distill = torch.tensor(0.0, device=pos_logits.device)
+    if (
+        getattr(args, "distill_text", False)
+        and teacher_text_features is not None
+        and photo_text_distill_features is not None
+        and sk_text_distill_features is not None
+    ):
+        loss_text_distill = (
+            cross_loss(photo_text_distill_features, teacher_text_features, args)
+            + cross_loss(sk_text_distill_features, teacher_text_features, args)
+        )
     
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(
@@ -189,11 +208,13 @@ def loss_fn(args, model, features, mode='train'):
     # - dfn5b  teacher: lambda_distill cần lớn hơn (~10–50) vì RKD scale nhỏ hơn
     #   gợi ý: bắt đầu với lambda_distill=10.0 khi dùng dfn5b
     lambda_distill = getattr(args, 'lambda_distill', 1.0)
+    lambda_text_distill = getattr(args, 'lambda_text_distill', 1.0)
     
     total_loss = (
         loss_cls \
         + loss_triplet \
         + lambda_distill * loss_distill \
+        + lambda_text_distill * loss_text_distill \
         + nt_xent_loss
     )
     

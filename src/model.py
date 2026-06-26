@@ -57,6 +57,7 @@ def _load_teacher(args):
     model_name, pretrained = _TEACHER_REGISTRY[teacher_key]
     print(f"[Teacher] Đang load {teacher_key} ({model_name}, pretrained={pretrained})...")
     teacher, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
+    teacher.text_tokenizer = open_clip.get_tokenizer(model_name)
     teacher.eval()
     for p in teacher.parameters():
         p.requires_grad = False
@@ -145,6 +146,14 @@ class CustomCLIP(nn.Module):
                 "[Distill] use_distill_proj=True -> "
                 f"student feature 512 -> {self._distill_proj_dim}"
             )
+        self._distill_text = getattr(cfg, "distill_text", False)
+        if self._distill_text:
+            self.text_distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
+            self._teacher_text_cache = {}
+            print(
+                "[Distill] distill_text=True -> "
+                f"student text 512 -> {self._distill_proj_dim}"
+            )
         self._train_teacher_ln = getattr(cfg, "train_teacher_ln", False)
         if self._train_teacher_ln:
             teacher_visual = getattr(self.model_distill, "visual", self.model_distill)
@@ -180,7 +189,34 @@ class CustomCLIP(nn.Module):
             return feature
         return self.distill_proj(feature.type(self.dtype))
 
-    def get_logits(self, img_tensor, classnames, type='photo'):
+    def project_text_distill_feature(self, feature):
+        if not self._distill_text:
+            return feature
+        return self.text_distill_proj(feature.type(self.dtype))
+
+    def get_teacher_text_features(self, classnames):
+        if not self._distill_text or not self._use_strong_teacher:
+            return None
+
+        cache_key = tuple(classnames)
+        if cache_key in self._teacher_text_cache:
+            return self._teacher_text_cache[cache_key]
+
+        tokenizer = getattr(self.model_distill, "text_tokenizer", None)
+        if tokenizer is None:
+            return None
+
+        prompts = [
+            "a photo/sketch of " + name.replace("_", " ") + "."
+            for name in classnames
+        ]
+        tokenized = tokenizer(prompts).to(device)
+        with torch.no_grad():
+            text_features = self.model_distill.encode_text(tokenized)
+        self._teacher_text_cache[cache_key] = text_features
+        return text_features
+
+    def get_logits(self, img_tensor, classnames, type='photo', return_text=False):
         if type=='photo':
             prompt_learner = self.prompt_learner_photo
             image_encoder = self.ph_encoder
@@ -230,12 +266,18 @@ class CustomCLIP(nn.Module):
 
         logits = logit_scale * image_features_normalize @ text_features.t()
         
+        if return_text:
+            return logits, image_features_normalize, image_features, text_features
         return logits, image_features_normalize, image_features
         
     def forward(self, x, classnames):
         photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, neg_tensor, label = x
-        pos_logits, photo_features_norm, photo_feature = self.get_logits(photo_tensor, classnames)
-        sk_logits, sk_feature_norm, sk_feature = self.get_logits(sk_tensor, classnames, type='sketch')
+        pos_logits, photo_features_norm, photo_feature, photo_text_feature = self.get_logits(
+            photo_tensor, classnames, return_text=True
+        )
+        sk_logits, sk_feature_norm, sk_feature, sk_text_feature = self.get_logits(
+            sk_tensor, classnames, type='sketch', return_text=True
+        )
         _, neg_feature, neg_raw_feature = self.get_logits(neg_tensor, classnames)
         
         if self._distill_photo_only:
@@ -274,10 +316,14 @@ class CustomCLIP(nn.Module):
         photo_distill_feature = self.project_distill_feature(photo_feature)
         sk_distill_feature = self.project_distill_feature(sk_feature)
         neg_distill_feature = self.project_distill_feature(neg_raw_feature)
+        photo_text_distill_feature = self.project_text_distill_feature(photo_text_feature)
+        sk_text_distill_feature = self.project_text_distill_feature(sk_text_feature)
+        teacher_text_feature = self.get_teacher_text_features(classnames)
             
         return photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
             neg_feature, label, pos_logits, sk_logits, photo_feature, sk_feature, \
-            photo_distill_feature, sk_distill_feature, neg_distill_feature
+            photo_distill_feature, sk_distill_feature, neg_distill_feature, \
+            photo_text_distill_feature, sk_text_distill_feature, teacher_text_feature
         
     def extract_feature(self, image, classname, type='photo'):
         _, feature, raw_feature = self.get_logits(image, classnames=classname, type=type)

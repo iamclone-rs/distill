@@ -111,6 +111,10 @@ if __name__ == "__main__":
                         help='Thêm linear projection student sang teacher dim rồi distill bằng cross_loss InfoNCE.')
     parser.add_argument('--distill_photo_only', action='store_true', default=False,
                         help='Chỉ distill nhánh photo từ teacher; sketch học qua CE/triplet/NT-Xent.')
+    parser.add_argument('--distill_text', action='store_true', default=False,
+                        help='Distill text features từ teacher text encoder sang student text prompts.')
+    parser.add_argument('--lambda_text_distill', type=float, default=1.0,
+                        help='Trọng số riêng cho text distillation loss.')
     parser.add_argument('--infer_with_distill_proj', action='store_true', default=False,
                         help='Dùng projected feature cho validation/inference retrieval.')
     parser.add_argument('--rkd_weight', type=float, default=0.5,
