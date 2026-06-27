@@ -145,6 +145,14 @@ if __name__ == "__main__":
                         help='Trọng số riêng cho text distillation loss.')
     parser.add_argument('--lambda_text_rkd', type=float, default=0.0,
                         help='Trọng số RKD phụ cho text prompt features, cộng song song với text_distill_mode hiện tại.')
+    parser.add_argument('--distill_xsupcon', action='store_true', default=False,
+                        help='Bật cross-modal supervised contrastive loss cho sketch->photo theo class label.')
+    parser.add_argument('--lambda_xsupcon', type=float, default=1.0,
+                        help='Trọng số cho cross-modal supervised contrastive loss.')
+    parser.add_argument('--xsupcon_temperature', type=float, default=0.07,
+                        help='Temperature cho cross-modal supervised contrastive loss.')
+    parser.add_argument('--xsupcon_bidirectional', action='store_true', default=False,
+                        help='Thêm chiều photo->sketch cho cross-modal supervised contrastive loss.')
     parser.add_argument('--distill_rank', action='store_true', default=False,
                         help='Bật text-guided ranking distillation cho sketch->photo retrieval.')
     parser.add_argument('--lambda_rank_distill', type=float, default=1.0,

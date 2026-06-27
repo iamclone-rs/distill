@@ -271,6 +271,37 @@ def class_aware_listwise_distill(
     return loss
 
 
+def cross_modal_supcon_loss(
+    query_feat: torch.Tensor,
+    gallery_feat: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: float = 0.07,
+    bidirectional: bool = False,
+) -> torch.Tensor:
+    """
+    Cross-modal supervised contrastive loss for category-level SBIR.
+
+    For each sketch query, every photo with the same class label is positive.
+    """
+    q = F.normalize(query_feat.float(), dim=-1)
+    g = F.normalize(gallery_feat.float(), dim=-1)
+    labels = labels.to(query_feat.device)
+
+    pos_mask = labels[:, None].eq(labels[None, :]).float()
+    logits = (q @ g.T) / temperature
+    log_prob = F.log_softmax(logits, dim=-1)
+    loss = -((pos_mask * log_prob).sum(dim=-1) / pos_mask.sum(dim=-1).clamp_min(1.0)).mean()
+
+    if bidirectional:
+        logits_t = (g @ q.T) / temperature
+        log_prob_t = F.log_softmax(logits_t, dim=-1)
+        pos_mask_t = pos_mask.T
+        loss_t = -((pos_mask_t * log_prob_t).sum(dim=-1) / pos_mask_t.sum(dim=-1).clamp_min(1.0)).mean()
+        loss = 0.5 * (loss + loss_t)
+
+    return loss
+
+
 def loss_fn(args, model, features, mode='train'):
     photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
         neg_features, label, pos_logits, sk_logits, photo_features, sk_features = features[:10]
@@ -463,6 +494,16 @@ def loss_fn(args, model, features, mode='train'):
             teacher_weight=getattr(args, "listwise_teacher_weight", 0.5),
             bidirectional=getattr(args, "listwise_bidirectional", False),
         )
+
+    loss_xsupcon = torch.tensor(0.0, device=pos_logits.device)
+    if getattr(args, "distill_xsupcon", False):
+        loss_xsupcon = cross_modal_supcon_loss(
+            query_feat=sk_features,
+            gallery_feat=photo_features,
+            labels=label,
+            temperature=getattr(args, "xsupcon_temperature", 0.07),
+            bidirectional=getattr(args, "xsupcon_bidirectional", False),
+        )
     
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(
@@ -484,6 +525,7 @@ def loss_fn(args, model, features, mode='train'):
     lambda_rank_distill = getattr(args, 'lambda_rank_distill', 1.0)
     lambda_xmodal_distill = getattr(args, 'lambda_xmodal_distill', 1.0)
     lambda_listwise_distill = getattr(args, 'lambda_listwise_distill', 1.0)
+    lambda_xsupcon = getattr(args, 'lambda_xsupcon', 1.0)
     
     total_loss = (
         loss_cls \
@@ -495,6 +537,7 @@ def loss_fn(args, model, features, mode='train'):
         + lambda_rank_distill * loss_rank_distill \
         + lambda_xmodal_distill * loss_xmodal_distill \
         + lambda_listwise_distill * loss_listwise_distill \
+        + lambda_xsupcon * loss_xsupcon \
         + nt_xent_loss
     )
     
