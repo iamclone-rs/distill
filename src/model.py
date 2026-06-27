@@ -151,7 +151,13 @@ class CustomCLIP(nn.Module):
         self._distill_text = getattr(cfg, "distill_text", False)
         self._distill_rank = getattr(cfg, "distill_rank", False)
         self._distill_xmodal = getattr(cfg, "distill_xmodal", False)
-        self._need_teacher_text = self._distill_text or self._distill_rank or self._distill_xmodal
+        self._distill_listwise = getattr(cfg, "distill_listwise", False)
+        self._need_teacher_text = (
+            self._distill_text
+            or self._distill_rank
+            or self._distill_xmodal
+            or self._distill_listwise
+        )
         if self._distill_text:
             self.text_distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
         if self._need_teacher_text:
@@ -165,6 +171,8 @@ class CustomCLIP(nn.Module):
             print("[Distill] distill_rank=True -> text-guided sketch->photo ranking KD")
         if self._distill_xmodal:
             print("[Distill] distill_xmodal=True -> cross-modal sketch->photo matrix KD")
+        if self._distill_listwise:
+            print("[Distill] distill_listwise=True -> class-aware listwise sketch->photo KD")
         self._train_teacher_ln = getattr(cfg, "train_teacher_ln", False)
         if self._train_teacher_ln:
             teacher_visual = getattr(self.model_distill, "visual", self.model_distill)

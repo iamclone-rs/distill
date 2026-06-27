@@ -213,6 +213,64 @@ def cross_modal_matrix_distill(
     raise ValueError(f"Unknown xmodal_distill_mode: {mode}")
 
 
+def class_aware_listwise_distill(
+    student_query: torch.Tensor,
+    student_gallery: torch.Tensor,
+    teacher_query: torch.Tensor,
+    teacher_gallery: torch.Tensor,
+    labels: torch.Tensor,
+    student_temperature: float = 0.07,
+    teacher_temperature: float = 0.07,
+    teacher_weight: float = 0.5,
+    bidirectional: bool = False,
+) -> torch.Tensor:
+    """
+    Listwise sketch->photo distillation for category-level SBIR.
+
+    It fixes diagonal InfoNCE's weak point: all gallery photos with the same
+    class label are positives, not only the item at the same batch index.
+    """
+    sq = F.normalize(student_query.float(), dim=-1)
+    sg = F.normalize(student_gallery.float(), dim=-1)
+    tq = F.normalize(teacher_query.float(), dim=-1)
+    tg = F.normalize(teacher_gallery.float(), dim=-1)
+
+    labels = labels.to(student_query.device)
+    pos_mask = labels[:, None].eq(labels[None, :]).float()
+    class_target = pos_mask / pos_mask.sum(dim=-1, keepdim=True).clamp_min(1.0)
+
+    teacher_weight = max(0.0, min(1.0, float(teacher_weight)))
+    student_logits = (sq @ sg.T) / student_temperature
+    with torch.no_grad():
+        teacher_logits = (tq @ tg.T) / teacher_temperature
+        teacher_target = F.softmax(teacher_logits, dim=-1)
+        target = teacher_weight * teacher_target + (1.0 - teacher_weight) * class_target
+
+    loss = F.kl_div(
+        F.log_softmax(student_logits, dim=-1),
+        target,
+        reduction='batchmean',
+    )
+
+    if bidirectional:
+        class_target_t = pos_mask.T / pos_mask.T.sum(dim=-1, keepdim=True).clamp_min(1.0)
+        student_logits_t = (sg @ sq.T) / student_temperature
+        with torch.no_grad():
+            teacher_logits_t = (tg @ tq.T) / teacher_temperature
+            teacher_target_t = F.softmax(teacher_logits_t, dim=-1)
+            target_t = teacher_weight * teacher_target_t + (1.0 - teacher_weight) * class_target_t
+        loss = 0.5 * (
+            loss
+            + F.kl_div(
+                F.log_softmax(student_logits_t, dim=-1),
+                target_t,
+                reduction='batchmean',
+            )
+        )
+
+    return loss
+
+
 def loss_fn(args, model, features, mode='train'):
     photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
         neg_features, label, pos_logits, sk_logits, photo_features, sk_features = features[:10]
@@ -362,6 +420,23 @@ def loss_fn(args, model, features, mode='train'):
             teacher_gallery=photo_aug_features,
             mode=getattr(args, "xmodal_distill_mode", "smoothl1"),
         )
+
+    loss_listwise_distill = torch.tensor(0.0, device=pos_logits.device)
+    if getattr(args, "distill_listwise", False):
+        if teacher_text_features is None:
+            raise ValueError("distill_listwise cần strong teacher có text encoder, ví dụ --teacher dfn5b hoặc --teacher laion_h.")
+        teacher_query = teacher_text_features[label]
+        loss_listwise_distill = class_aware_listwise_distill(
+            student_query=sk_features,
+            student_gallery=photo_features,
+            teacher_query=teacher_query,
+            teacher_gallery=photo_aug_features,
+            labels=label,
+            student_temperature=getattr(args, "listwise_distill_temperature", 0.07),
+            teacher_temperature=getattr(args, "teacher_listwise_temperature", 0.07),
+            teacher_weight=getattr(args, "listwise_teacher_weight", 0.5),
+            bidirectional=getattr(args, "listwise_bidirectional", False),
+        )
     
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(
@@ -382,6 +457,7 @@ def loss_fn(args, model, features, mode='train'):
     lambda_text_distill = getattr(args, 'lambda_text_distill', 1.0)
     lambda_rank_distill = getattr(args, 'lambda_rank_distill', 1.0)
     lambda_xmodal_distill = getattr(args, 'lambda_xmodal_distill', 1.0)
+    lambda_listwise_distill = getattr(args, 'lambda_listwise_distill', 1.0)
     
     total_loss = (
         loss_cls \
@@ -390,6 +466,7 @@ def loss_fn(args, model, features, mode='train'):
         + lambda_text_distill * loss_text_distill \
         + lambda_rank_distill * loss_rank_distill \
         + lambda_xmodal_distill * loss_xmodal_distill \
+        + lambda_listwise_distill * loss_listwise_distill \
         + nt_xent_loss
     )
     

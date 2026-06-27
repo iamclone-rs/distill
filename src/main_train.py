@@ -154,12 +154,25 @@ if __name__ == "__main__":
     parser.add_argument('--xmodal_distill_mode', type=str, default='smoothl1',
                         choices=['mse', 'smoothl1'],
                         help='Loss dùng để match ma trận similarity sketch->photo.')
+    parser.add_argument('--distill_listwise', action='store_true', default=False,
+                        help='Bật class-aware listwise distillation cho sketch->photo retrieval.')
+    parser.add_argument('--lambda_listwise_distill', type=float, default=1.0,
+                        help='Trọng số cho class-aware listwise distillation.')
+    parser.add_argument('--listwise_teacher_weight', type=float, default=0.5,
+                        help='Tỷ lệ teacher soft target trong listwise loss; phần còn lại là class-positive target.')
+    parser.add_argument('--listwise_distill_temperature', type=float, default=0.07,
+                        help='Temperature cho student listwise logits.')
+    parser.add_argument('--teacher_listwise_temperature', type=float, default=0.07,
+                        help='Temperature cho teacher listwise logits.')
+    parser.add_argument('--listwise_bidirectional', action='store_true', default=False,
+                        help='Thêm chiều photo->sketch cho listwise distillation.')
     parser.add_argument('--distill_method', type=str, default='manual',
-                        choices=['manual', 'rank', 'xmodal'],
+                        choices=['manual', 'rank', 'xmodal', 'listwise'],
                         help=(
                             "Preset distill. manual dùng các flag riêng; "
                             "rank bật ranking distill; "
-                            "xmodal bật cross-modal matrix distill."
+                            "xmodal bật cross-modal matrix distill; "
+                            "listwise bật class-aware listwise distill."
                         ))
     parser.add_argument('--infer_with_distill_proj', action='store_true', default=False,
                         help='Dùng projected feature cho validation/inference retrieval.')
@@ -184,6 +197,11 @@ if __name__ == "__main__":
     elif args.distill_method == 'xmodal':
         args.use_distill_proj = False
         args.distill_xmodal = True
+        args.distill_photo_only = True
+        args.image_distill_mode = 'none'
+    elif args.distill_method == 'listwise':
+        args.use_distill_proj = False
+        args.distill_listwise = True
         args.distill_photo_only = True
         args.image_distill_mode = 'none'
 
