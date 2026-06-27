@@ -111,11 +111,12 @@ if __name__ == "__main__":
     parser.add_argument('--use_distill_proj', action='store_true', default=False,
                         help='Thêm linear projection student sang teacher dim rồi distill bằng cross_loss InfoNCE.')
     parser.add_argument('--image_distill_mode', type=str, default='auto',
-                        choices=['auto', 'none', 'infonce', 'rkd'],
+                        choices=['auto', 'none', 'infonce', 'rkd', 'cosine', 'mse', 'mae', 'smoothl1'],
                         help=(
                             "Cách distill image feature. "
                             "auto giữ hành vi cũ; none tắt image distill; "
-                            "infonce dùng cross_loss; rkd dùng relational KD."
+                            "infonce dùng cross_loss; rkd dùng relational KD; "
+                            "cosine/mse/mae/smoothl1 dùng feature regression."
                         ))
     parser.add_argument('--distill_photo_only', action='store_true', default=False,
                         help='Chỉ distill nhánh photo từ teacher; sketch học qua CE/triplet/NT-Xent.')
@@ -123,6 +124,12 @@ if __name__ == "__main__":
                         help='Trọng số sketch distill phụ khi dùng distill_photo_only.')
     parser.add_argument('--distill_text', action='store_true', default=False,
                         help='Distill text features từ teacher text encoder sang student text prompts.')
+    parser.add_argument('--text_distill_mode', type=str, default='infonce',
+                        choices=['infonce', 'cosine', 'mse', 'mae', 'smoothl1'],
+                        help=(
+                            "Cách distill text feature khi bật --distill_text. "
+                            "infonce giữ hành vi cũ; cosine/mse/mae/smoothl1 dùng feature regression."
+                        ))
     parser.add_argument('--lambda_text_distill', type=float, default=1.0,
                         help='Trọng số riêng cho text distillation loss.')
     parser.add_argument('--distill_rank', action='store_true', default=False,

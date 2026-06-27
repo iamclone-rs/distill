@@ -121,6 +121,36 @@ def projected_kd_loss(
     return loss_cos + loss_contrast + rkd_weight * loss_rkd
 
 
+def feature_regression_kd(
+    student_feat: torch.Tensor,
+    teacher_feat: torch.Tensor,
+    mode: str = "cosine",
+) -> torch.Tensor:
+    """
+    Sample-wise feature regression KD.
+    Use after projection when student and teacher dimensions differ.
+    """
+    if student_feat.shape[-1] != teacher_feat.shape[-1]:
+        raise ValueError(
+            "feature regression KD cần student_feat và teacher_feat cùng chiều. "
+            "Với teacher 1024-dim, hãy bật --use_distill_proj."
+        )
+
+    s = F.normalize(student_feat.float(), dim=-1)
+    t = F.normalize(teacher_feat.float(), dim=-1)
+
+    if mode == "cosine":
+        return 1.0 - (s * t).sum(dim=-1).mean()
+    if mode == "mse":
+        return F.mse_loss(s, t)
+    if mode == "mae":
+        return F.l1_loss(s, t)
+    if mode == "smoothl1":
+        return F.smooth_l1_loss(s, t)
+
+    raise ValueError(f"Unknown feature regression KD mode: {mode}")
+
+
 def text_guided_rank_distill(
     student_query: torch.Tensor,
     student_gallery: torch.Tensor,
@@ -190,6 +220,17 @@ def loss_fn(args, model, features, mode='train'):
     elif image_distill_mode == "infonce":
         loss_distill_photo = cross_loss(photo_distill_features, photo_aug_features, args)
         loss_distill_sk    = cross_loss(sk_distill_features,    sk_aug_features,    args)
+    elif image_distill_mode in ("cosine", "mse", "mae", "smoothl1"):
+        loss_distill_photo = feature_regression_kd(
+            photo_distill_features,
+            photo_aug_features,
+            mode=image_distill_mode,
+        )
+        loss_distill_sk = feature_regression_kd(
+            sk_distill_features,
+            sk_aug_features,
+            mode=image_distill_mode,
+        )
     elif image_distill_mode == "auto":
         if getattr(args, "use_distill_proj", False):
             loss_distill_photo = cross_loss(photo_distill_features, photo_aug_features, args)
@@ -228,10 +269,27 @@ def loss_fn(args, model, features, mode='train'):
         and photo_text_distill_features is not None
         and sk_text_distill_features is not None
     ):
-        loss_text_distill = (
-            cross_loss(photo_text_distill_features, teacher_text_features, args)
-            + cross_loss(sk_text_distill_features, teacher_text_features, args)
-        )
+        text_distill_mode = getattr(args, "text_distill_mode", "infonce")
+        if text_distill_mode == "infonce":
+            loss_text_distill = (
+                cross_loss(photo_text_distill_features, teacher_text_features, args)
+                + cross_loss(sk_text_distill_features, teacher_text_features, args)
+            )
+        elif text_distill_mode in ("cosine", "mse", "mae", "smoothl1"):
+            loss_text_distill = (
+                feature_regression_kd(
+                    photo_text_distill_features,
+                    teacher_text_features,
+                    mode=text_distill_mode,
+                )
+                + feature_regression_kd(
+                    sk_text_distill_features,
+                    teacher_text_features,
+                    mode=text_distill_mode,
+                )
+            )
+        else:
+            raise ValueError(f"Unknown text_distill_mode: {text_distill_mode}")
 
     loss_rank_distill = torch.tensor(0.0, device=pos_logits.device)
     if getattr(args, "distill_rank", False):
