@@ -183,6 +183,36 @@ def text_guided_rank_distill(
     )
 
 
+def cross_modal_matrix_distill(
+    student_query: torch.Tensor,
+    student_gallery: torch.Tensor,
+    teacher_query: torch.Tensor,
+    teacher_gallery: torch.Tensor,
+    mode: str = "smoothl1",
+) -> torch.Tensor:
+    """
+    Match the actual sketch->photo similarity matrix.
+
+    Student matrix: sketch_student @ photo_student.T
+    Teacher matrix: teacher_text[label] @ teacher_photo.T
+    """
+    sq = F.normalize(student_query.float(), dim=-1)
+    sg = F.normalize(student_gallery.float(), dim=-1)
+    tq = F.normalize(teacher_query.float(), dim=-1)
+    tg = F.normalize(teacher_gallery.float(), dim=-1)
+
+    student_sim = sq @ sg.T
+    with torch.no_grad():
+        teacher_sim = tq @ tg.T
+
+    if mode == "mse":
+        return F.mse_loss(student_sim, teacher_sim)
+    if mode == "smoothl1":
+        return F.smooth_l1_loss(student_sim, teacher_sim)
+
+    raise ValueError(f"Unknown xmodal_distill_mode: {mode}")
+
+
 def loss_fn(args, model, features, mode='train'):
     photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
         neg_features, label, pos_logits, sk_logits, photo_features, sk_features = features[:10]
@@ -319,6 +349,19 @@ def loss_fn(args, model, features, mode='train'):
             student_temperature=getattr(args, "rank_distill_temperature", 0.07),
             teacher_temperature=getattr(args, "teacher_rank_temperature", 0.07),
         )
+
+    loss_xmodal_distill = torch.tensor(0.0, device=pos_logits.device)
+    if getattr(args, "distill_xmodal", False):
+        if teacher_text_features is None:
+            raise ValueError("distill_xmodal cần strong teacher có text encoder, ví dụ --teacher dfn5b hoặc --teacher laion_h.")
+        teacher_query = teacher_text_features[label]
+        loss_xmodal_distill = cross_modal_matrix_distill(
+            student_query=sk_features,
+            student_gallery=photo_features,
+            teacher_query=teacher_query,
+            teacher_gallery=photo_aug_features,
+            mode=getattr(args, "xmodal_distill_mode", "smoothl1"),
+        )
     
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(
@@ -338,6 +381,7 @@ def loss_fn(args, model, features, mode='train'):
     
     lambda_text_distill = getattr(args, 'lambda_text_distill', 1.0)
     lambda_rank_distill = getattr(args, 'lambda_rank_distill', 1.0)
+    lambda_xmodal_distill = getattr(args, 'lambda_xmodal_distill', 1.0)
     
     total_loss = (
         loss_cls \
@@ -345,6 +389,7 @@ def loss_fn(args, model, features, mode='train'):
         + loss_distill \
         + lambda_text_distill * loss_text_distill \
         + lambda_rank_distill * loss_rank_distill \
+        + lambda_xmodal_distill * loss_xmodal_distill \
         + nt_xent_loss
     )
     

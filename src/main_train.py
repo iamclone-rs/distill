@@ -147,11 +147,19 @@ if __name__ == "__main__":
                         help='Temperature cho student ranking distribution.')
     parser.add_argument('--teacher_rank_temperature', type=float, default=0.07,
                         help='Temperature cho teacher ranking distribution.')
+    parser.add_argument('--distill_xmodal', action='store_true', default=False,
+                        help='Bật cross-modal similarity matrix distillation cho sketch->photo retrieval.')
+    parser.add_argument('--lambda_xmodal_distill', type=float, default=1.0,
+                        help='Trọng số cho cross-modal similarity matrix distillation.')
+    parser.add_argument('--xmodal_distill_mode', type=str, default='smoothl1',
+                        choices=['mse', 'smoothl1'],
+                        help='Loss dùng để match ma trận similarity sketch->photo.')
     parser.add_argument('--distill_method', type=str, default='manual',
-                        choices=['manual', 'rank'],
+                        choices=['manual', 'rank', 'xmodal'],
                         help=(
                             "Preset distill. manual dùng các flag riêng; "
-                            "rank bật ranking distill và tắt image InfoNCE/RKD."
+                            "rank bật ranking distill; "
+                            "xmodal bật cross-modal matrix distill."
                         ))
     parser.add_argument('--infer_with_distill_proj', action='store_true', default=False,
                         help='Dùng projected feature cho validation/inference retrieval.')
@@ -171,6 +179,11 @@ if __name__ == "__main__":
     if args.distill_method == 'rank':
         args.use_distill_proj = False
         args.distill_rank = True
+        args.distill_photo_only = True
+        args.image_distill_mode = 'none'
+    elif args.distill_method == 'xmodal':
+        args.use_distill_proj = False
+        args.distill_xmodal = True
         args.distill_photo_only = True
         args.image_distill_mode = 'none'
 
