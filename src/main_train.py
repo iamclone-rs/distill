@@ -95,11 +95,12 @@ if __name__ == "__main__":
     parser.add_argument('--visualize', action='store_true', default=False)
     parser.add_argument('--gzs', action='store_true', default=False)
     parser.add_argument('--teacher', type=str, default='clip32',
-                        choices=['clip32', 'dfn5b'],
+                        choices=['clip32', 'dfn5b', 'laion_h'],
                         help=(
                             "Teacher model cho distillation:\n"
                             "  clip32 → CLIP ViT-B/32 (mặc định, cross_loss)\n"
-                            "  dfn5b  → DFN5B-CLIP-H/14 1024-dim (RKD loss, cần open-clip-torch)"
+                            "  dfn5b  → DFN5B-CLIP-H/14 1024-dim (cần open-clip-torch)\n"
+                            "  laion_h → LAION CLIP-H/14 1024-dim (cần open-clip-torch)"
                         ))
     parser.add_argument('--lambda_distill', type=float, default=1.0,
                         help=(

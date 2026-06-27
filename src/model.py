@@ -26,6 +26,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _TEACHER_REGISTRY = {
     # key         : (open_clip model name,    pretrained tag)
     "dfn5b"       : ("ViT-H-14-quickgelu",   "dfn5b"),
+    "laion_h"     : ("ViT-H-14",             "laion2b_s32b_b79k"),
 }
 
 def _load_teacher(args):
@@ -35,6 +36,7 @@ def _load_teacher(args):
     args.teacher:
         'clip32'  → None  (dùng clip_model_distill ViT-B/32, hành vi gốc)
         'dfn5b'   → DFN5B-CLIP-H/14 (1024-dim, frozen, via open_clip)
+        'laion_h' → LAION CLIP-H/14 (1024-dim, frozen, via open_clip)
     """
     teacher_key = getattr(args, "teacher", "clip32")
 
