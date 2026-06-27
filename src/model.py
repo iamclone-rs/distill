@@ -152,11 +152,13 @@ class CustomCLIP(nn.Module):
         self._distill_rank = getattr(cfg, "distill_rank", False)
         self._distill_xmodal = getattr(cfg, "distill_xmodal", False)
         self._distill_listwise = getattr(cfg, "distill_listwise", False)
+        self._aux_text_rkd = getattr(cfg, "lambda_text_rkd", 0.0) > 0
         self._need_teacher_text = (
             self._distill_text
             or self._distill_rank
             or self._distill_xmodal
             or self._distill_listwise
+            or self._aux_text_rkd
         )
         if self._distill_text:
             self.text_distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
@@ -173,6 +175,8 @@ class CustomCLIP(nn.Module):
             print("[Distill] distill_xmodal=True -> cross-modal sketch->photo matrix KD")
         if self._distill_listwise:
             print("[Distill] distill_listwise=True -> class-aware listwise sketch->photo KD")
+        if self._aux_text_rkd:
+            print("[Distill] lambda_text_rkd>0 -> auxiliary text RKD")
         self._train_teacher_ln = getattr(cfg, "train_teacher_ln", False)
         if self._train_teacher_ln:
             teacher_visual = getattr(self.model_distill, "visual", self.model_distill)
@@ -300,7 +304,10 @@ class CustomCLIP(nn.Module):
         _, neg_feature, neg_raw_feature = self.get_logits(neg_tensor, classnames)
         
         if self._distill_photo_only:
-            train_sketch_distill = getattr(self.cfg, "lambda_sketch_distill", 0.0) > 0
+            train_sketch_distill = (
+                getattr(self.cfg, "lambda_sketch_distill", 0.0) > 0
+                or getattr(self.cfg, "lambda_sketch_rkd", 0.0) > 0
+            )
             teacher_input = photo_aug_tensor.float() if self._use_strong_teacher else photo_aug_tensor
             with torch.no_grad():
                 photo_aug_features = self.model_distill.encode_image(teacher_input)

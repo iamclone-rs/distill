@@ -360,6 +360,20 @@ def loss_fn(args, model, features, mode='train'):
     else:
         loss_distill = lambda_distill * (loss_distill_sk + loss_distill_photo)
 
+    lambda_photo_rkd = getattr(args, "lambda_photo_rkd", 0.0)
+    lambda_sketch_rkd = getattr(args, "lambda_sketch_rkd", 0.0)
+    loss_aux_image_rkd = torch.tensor(0.0, device=pos_logits.device)
+    if lambda_photo_rkd > 0:
+        loss_aux_image_rkd = loss_aux_image_rkd + lambda_photo_rkd * relational_kd_loss(
+            photo_features,
+            photo_aug_features,
+        )
+    if lambda_sketch_rkd > 0:
+        loss_aux_image_rkd = loss_aux_image_rkd + lambda_sketch_rkd * relational_kd_loss(
+            sk_features,
+            sk_aug_features,
+        )
+
     loss_text_distill = torch.tensor(0.0, device=pos_logits.device)
     if (
         getattr(args, "distill_text", False)
@@ -393,6 +407,18 @@ def loss_fn(args, model, features, mode='train'):
             )
         else:
             raise ValueError(f"Unknown text_distill_mode: {text_distill_mode}")
+
+    lambda_text_rkd = getattr(args, "lambda_text_rkd", 0.0)
+    loss_aux_text_rkd = torch.tensor(0.0, device=pos_logits.device)
+    if lambda_text_rkd > 0:
+        if teacher_text_features is None:
+            raise ValueError("lambda_text_rkd cần strong teacher có text encoder, ví dụ --teacher dfn5b hoặc --teacher laion_h.")
+        if photo_text_distill_features is None or sk_text_distill_features is None:
+            raise ValueError("lambda_text_rkd cần text features từ model forward.")
+        loss_aux_text_rkd = lambda_text_rkd * (
+            relational_kd_loss(photo_text_distill_features, teacher_text_features)
+            + relational_kd_loss(sk_text_distill_features, teacher_text_features)
+        )
 
     loss_rank_distill = torch.tensor(0.0, device=pos_logits.device)
     if getattr(args, "distill_rank", False):
@@ -463,7 +489,9 @@ def loss_fn(args, model, features, mode='train'):
         loss_cls \
         + loss_triplet \
         + loss_distill \
+        + loss_aux_image_rkd \
         + lambda_text_distill * loss_text_distill \
+        + loss_aux_text_rkd \
         + lambda_rank_distill * loss_rank_distill \
         + lambda_xmodal_distill * loss_xmodal_distill \
         + lambda_listwise_distill * loss_listwise_distill \

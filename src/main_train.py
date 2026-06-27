@@ -128,6 +128,10 @@ if __name__ == "__main__":
                         help='Chỉ distill nhánh photo từ teacher; sketch học qua CE/triplet/NT-Xent.')
     parser.add_argument('--lambda_sketch_distill', type=float, default=0.0,
                         help='Trọng số riêng cho sketch image distill khi dùng lambda_photo_distill hoặc distill_photo_only.')
+    parser.add_argument('--lambda_photo_rkd', type=float, default=0.0,
+                        help='Trọng số RKD phụ cho photo image, cộng song song với image_distill_mode hiện tại.')
+    parser.add_argument('--lambda_sketch_rkd', type=float, default=0.0,
+                        help='Trọng số RKD phụ cho sketch image, cộng song song với image_distill_mode hiện tại.')
     parser.add_argument('--distill_text', action='store_true', default=False,
                         help='Distill text features từ teacher text encoder sang student text prompts.')
     parser.add_argument('--text_distill_mode', type=str, default='infonce',
@@ -139,6 +143,8 @@ if __name__ == "__main__":
                         ))
     parser.add_argument('--lambda_text_distill', type=float, default=1.0,
                         help='Trọng số riêng cho text distillation loss.')
+    parser.add_argument('--lambda_text_rkd', type=float, default=0.0,
+                        help='Trọng số RKD phụ cho text prompt features, cộng song song với text_distill_mode hiện tại.')
     parser.add_argument('--distill_rank', action='store_true', default=False,
                         help='Bật text-guided ranking distillation cho sketch->photo retrieval.')
     parser.add_argument('--lambda_rank_distill', type=float, default=1.0,
