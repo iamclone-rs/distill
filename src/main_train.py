@@ -108,6 +108,12 @@ if __name__ == "__main__":
                             "  clip32: 1.0 (mặc định, scale tương đương cls/nt_xent)\n"
                             "  dfn5b:  khuyến nghị 10.0–50.0 (RKD scale nhỏ hơn ~10–50x)"
                         ))
+    parser.add_argument('--lambda_photo_distill', type=float, default=None,
+                        help=(
+                            "Trọng số riêng cho photo image distill. "
+                            "Nếu set flag này, image distill dùng "
+                            "lambda_photo_distill * photo_loss + lambda_sketch_distill * sketch_loss."
+                        ))
     parser.add_argument('--use_distill_proj', action='store_true', default=False,
                         help='Thêm linear projection student sang teacher dim rồi distill bằng cross_loss InfoNCE.')
     parser.add_argument('--image_distill_mode', type=str, default='auto',
@@ -121,14 +127,15 @@ if __name__ == "__main__":
     parser.add_argument('--distill_photo_only', action='store_true', default=False,
                         help='Chỉ distill nhánh photo từ teacher; sketch học qua CE/triplet/NT-Xent.')
     parser.add_argument('--lambda_sketch_distill', type=float, default=0.0,
-                        help='Trọng số sketch distill phụ khi dùng distill_photo_only.')
+                        help='Trọng số riêng cho sketch image distill khi dùng lambda_photo_distill hoặc distill_photo_only.')
     parser.add_argument('--distill_text', action='store_true', default=False,
                         help='Distill text features từ teacher text encoder sang student text prompts.')
     parser.add_argument('--text_distill_mode', type=str, default='infonce',
-                        choices=['infonce', 'cosine', 'mse', 'mae', 'smoothl1'],
+                        choices=['infonce', 'cosine', 'mse', 'mae', 'smoothl1', 'rkd'],
                         help=(
                             "Cách distill text feature khi bật --distill_text. "
-                            "infonce giữ hành vi cũ; cosine/mse/mae/smoothl1 dùng feature regression."
+                            "infonce giữ hành vi cũ; cosine/mse/mae/smoothl1 dùng feature regression; "
+                            "rkd học quan hệ giữa các class text."
                         ))
     parser.add_argument('--lambda_text_distill', type=float, default=1.0,
                         help='Trọng số riêng cho text distillation loss.')

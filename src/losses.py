@@ -256,11 +256,21 @@ def loss_fn(args, model, features, mode='train'):
     # loss_distill_photo = F.l1_loss(photo_features, photo_aug_features)
     # loss_distill_sk = F.l1_loss(sk_features, sk_aug_features)
     
-    if getattr(args, "distill_photo_only", False):
-        lambda_sketch_distill = getattr(args, "lambda_sketch_distill", 0.0)
-        loss_distill = loss_distill_photo + lambda_sketch_distill * loss_distill_sk
+    lambda_photo_distill = getattr(args, "lambda_photo_distill", None)
+    lambda_sketch_distill = getattr(args, "lambda_sketch_distill", 0.0)
+    lambda_distill = getattr(args, 'lambda_distill', 1.0)
+
+    if lambda_photo_distill is not None:
+        loss_distill = (
+            lambda_photo_distill * loss_distill_photo
+            + lambda_sketch_distill * loss_distill_sk
+        )
+    elif getattr(args, "distill_photo_only", False):
+        loss_distill = lambda_distill * (
+            loss_distill_photo + lambda_sketch_distill * loss_distill_sk
+        )
     else:
-        loss_distill = loss_distill_sk + loss_distill_photo 
+        loss_distill = lambda_distill * (loss_distill_sk + loss_distill_photo)
 
     loss_text_distill = torch.tensor(0.0, device=pos_logits.device)
     if (
@@ -287,6 +297,11 @@ def loss_fn(args, model, features, mode='train'):
                     teacher_text_features,
                     mode=text_distill_mode,
                 )
+            )
+        elif text_distill_mode == "rkd":
+            loss_text_distill = (
+                relational_kd_loss(photo_text_distill_features, teacher_text_features)
+                + relational_kd_loss(sk_text_distill_features, teacher_text_features)
             )
         else:
             raise ValueError(f"Unknown text_distill_mode: {text_distill_mode}")
@@ -321,18 +336,13 @@ def loss_fn(args, model, features, mode='train'):
     else:
         nt_xent_loss = nt_xent(photo_features, sk_features)
     
-    # lambda_distill: điều chỉnh trọng số loss distillation
-    # - clip32 teacher: lambda_distill=1.0 là hợp lý (scale tương đương cls/nt_xent)
-    # - dfn5b  teacher: lambda_distill cần lớn hơn (~10–50) vì RKD scale nhỏ hơn
-    #   gợi ý: bắt đầu với lambda_distill=10.0 khi dùng dfn5b
-    lambda_distill = getattr(args, 'lambda_distill', 1.0)
     lambda_text_distill = getattr(args, 'lambda_text_distill', 1.0)
     lambda_rank_distill = getattr(args, 'lambda_rank_distill', 1.0)
     
     total_loss = (
         loss_cls \
         + loss_triplet \
-        + lambda_distill * loss_distill \
+        + loss_distill \
         + lambda_text_distill * loss_text_distill \
         + lambda_rank_distill * loss_rank_distill \
         + nt_xent_loss
