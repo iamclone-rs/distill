@@ -121,6 +121,38 @@ def projected_kd_loss(
     return loss_cos + loss_contrast + rkd_weight * loss_rkd
 
 
+def text_guided_rank_distill(
+    student_query: torch.Tensor,
+    student_gallery: torch.Tensor,
+    teacher_query: torch.Tensor,
+    teacher_gallery: torch.Tensor,
+    student_temperature: float = 0.07,
+    teacher_temperature: float = 0.07,
+) -> torch.Tensor:
+    """
+    Distill retrieval ranking, not feature coordinates.
+
+    Student learns the batch-wise sketch->photo ranking distribution.
+    Teacher target is built from teacher text(class)->teacher photo similarity,
+    so it works even when student is 512-dim and teacher is 1024-dim.
+    """
+    sq = F.normalize(student_query.float(), dim=-1)
+    sg = F.normalize(student_gallery.float(), dim=-1)
+    tq = F.normalize(teacher_query.float(), dim=-1)
+    tg = F.normalize(teacher_gallery.float(), dim=-1)
+
+    student_logits = (sq @ sg.T) / student_temperature
+    with torch.no_grad():
+        teacher_logits = (tq @ tg.T) / teacher_temperature
+        teacher_probs = F.softmax(teacher_logits, dim=-1)
+
+    return F.kl_div(
+        F.log_softmax(student_logits, dim=-1),
+        teacher_probs,
+        reduction='batchmean',
+    )
+
+
 def loss_fn(args, model, features, mode='train'):
     photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
         neg_features, label, pos_logits, sk_logits, photo_features, sk_features = features[:10]
@@ -144,19 +176,32 @@ def loss_fn(args, model, features, mode='train'):
     loss_ce_sk = F.cross_entropy(sk_logits, label)
     loss_cls = loss_ce_photo + loss_ce_sk
 
-    # Lựa chọn distill loss:
-    # - clip32 teacher (cùng dim 512) → cross_loss InfoNCE
-    # - dfn5b + use_distill_proj      → Linear 512->1024 rồi cross_loss InfoNCE
-    # - dfn5b không projection        → relational_kd_loss vì khác dim
-    if getattr(args, "use_distill_proj", False):
+    # Lựa chọn image distill loss:
+    # - auto giữ hành vi cũ.
+    # - none tắt image distill để thử các KD khác như rank/text.
+    image_distill_mode = getattr(args, "image_distill_mode", "auto")
+    zero = torch.tensor(0.0, device=pos_logits.device)
+    if image_distill_mode == "none":
+        loss_distill_photo = zero
+        loss_distill_sk = zero
+    elif image_distill_mode == "rkd":
+        loss_distill_photo = relational_kd_loss(photo_features, photo_aug_features)
+        loss_distill_sk = relational_kd_loss(sk_features, sk_aug_features)
+    elif image_distill_mode == "infonce":
         loss_distill_photo = cross_loss(photo_distill_features, photo_aug_features, args)
         loss_distill_sk    = cross_loss(sk_distill_features,    sk_aug_features,    args)
-    elif photo_aug_features.shape[-1] != photo_features.shape[-1]:
-        loss_distill_photo = relational_kd_loss(photo_features, photo_aug_features)
-        loss_distill_sk    = relational_kd_loss(sk_features,    sk_aug_features)
+    elif image_distill_mode == "auto":
+        if getattr(args, "use_distill_proj", False):
+            loss_distill_photo = cross_loss(photo_distill_features, photo_aug_features, args)
+            loss_distill_sk    = cross_loss(sk_distill_features,    sk_aug_features,    args)
+        elif photo_aug_features.shape[-1] != photo_features.shape[-1]:
+            loss_distill_photo = relational_kd_loss(photo_features, photo_aug_features)
+            loss_distill_sk    = relational_kd_loss(sk_features,    sk_aug_features)
+        else:
+            loss_distill_photo = cross_loss(photo_features, photo_aug_features, args)
+            loss_distill_sk    = cross_loss(sk_features,    sk_aug_features,    args)
     else:
-        loss_distill_photo = cross_loss(photo_features, photo_aug_features, args)
-        loss_distill_sk    = cross_loss(sk_features,    sk_aug_features,    args)
+        raise ValueError(f"Unknown image_distill_mode: {image_distill_mode}")
     
     # loss_distill_photo = F.mse_loss(photo_features, photo_aug_features)
     # loss_distill_sk = F.mse_loss(sk_features, sk_aug_features)
@@ -187,6 +232,20 @@ def loss_fn(args, model, features, mode='train'):
             cross_loss(photo_text_distill_features, teacher_text_features, args)
             + cross_loss(sk_text_distill_features, teacher_text_features, args)
         )
+
+    loss_rank_distill = torch.tensor(0.0, device=pos_logits.device)
+    if getattr(args, "distill_rank", False):
+        if teacher_text_features is None:
+            raise ValueError("distill_rank cần strong teacher có text encoder, ví dụ --teacher dfn5b hoặc --teacher laion_h.")
+        teacher_query = teacher_text_features[label]
+        loss_rank_distill = text_guided_rank_distill(
+            student_query=sk_features,
+            student_gallery=photo_features,
+            teacher_query=teacher_query,
+            teacher_gallery=photo_aug_features,
+            student_temperature=getattr(args, "rank_distill_temperature", 0.07),
+            teacher_temperature=getattr(args, "teacher_rank_temperature", 0.07),
+        )
     
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(
@@ -210,12 +269,14 @@ def loss_fn(args, model, features, mode='train'):
     #   gợi ý: bắt đầu với lambda_distill=10.0 khi dùng dfn5b
     lambda_distill = getattr(args, 'lambda_distill', 1.0)
     lambda_text_distill = getattr(args, 'lambda_text_distill', 1.0)
+    lambda_rank_distill = getattr(args, 'lambda_rank_distill', 1.0)
     
     total_loss = (
         loss_cls \
         + loss_triplet \
         + lambda_distill * loss_distill \
         + lambda_text_distill * loss_text_distill \
+        + lambda_rank_distill * loss_rank_distill \
         + nt_xent_loss
     )
     

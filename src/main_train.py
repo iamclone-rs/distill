@@ -110,6 +110,13 @@ if __name__ == "__main__":
                         ))
     parser.add_argument('--use_distill_proj', action='store_true', default=False,
                         help='Thêm linear projection student sang teacher dim rồi distill bằng cross_loss InfoNCE.')
+    parser.add_argument('--image_distill_mode', type=str, default='auto',
+                        choices=['auto', 'none', 'infonce', 'rkd'],
+                        help=(
+                            "Cách distill image feature. "
+                            "auto giữ hành vi cũ; none tắt image distill; "
+                            "infonce dùng cross_loss; rkd dùng relational KD."
+                        ))
     parser.add_argument('--distill_photo_only', action='store_true', default=False,
                         help='Chỉ distill nhánh photo từ teacher; sketch học qua CE/triplet/NT-Xent.')
     parser.add_argument('--lambda_sketch_distill', type=float, default=0.0,
@@ -118,6 +125,20 @@ if __name__ == "__main__":
                         help='Distill text features từ teacher text encoder sang student text prompts.')
     parser.add_argument('--lambda_text_distill', type=float, default=1.0,
                         help='Trọng số riêng cho text distillation loss.')
+    parser.add_argument('--distill_rank', action='store_true', default=False,
+                        help='Bật text-guided ranking distillation cho sketch->photo retrieval.')
+    parser.add_argument('--lambda_rank_distill', type=float, default=1.0,
+                        help='Trọng số cho ranking distillation loss.')
+    parser.add_argument('--rank_distill_temperature', type=float, default=0.07,
+                        help='Temperature cho student ranking distribution.')
+    parser.add_argument('--teacher_rank_temperature', type=float, default=0.07,
+                        help='Temperature cho teacher ranking distribution.')
+    parser.add_argument('--distill_method', type=str, default='manual',
+                        choices=['manual', 'rank'],
+                        help=(
+                            "Preset distill. manual dùng các flag riêng; "
+                            "rank bật ranking distill và tắt image InfoNCE/RKD."
+                        ))
     parser.add_argument('--infer_with_distill_proj', action='store_true', default=False,
                         help='Dùng projected feature cho validation/inference retrieval.')
     parser.add_argument('--rkd_weight', type=float, default=0.5,
@@ -133,6 +154,12 @@ if __name__ == "__main__":
 
     
     args = parser.parse_args()
+    if args.distill_method == 'rank':
+        args.use_distill_proj = False
+        args.distill_rank = True
+        args.distill_photo_only = True
+        args.image_distill_mode = 'none'
+
     logger = TensorBoardLogger('tb_logs', name=args.exp_name)
     
     checkpoint_callback = ModelCheckpoint(
