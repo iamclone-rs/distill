@@ -117,11 +117,12 @@ if __name__ == "__main__":
     parser.add_argument('--use_distill_proj', action='store_true', default=False,
                         help='Thêm linear projection student sang teacher dim rồi distill bằng cross_loss InfoNCE.')
     parser.add_argument('--image_distill_mode', type=str, default='auto',
-                        choices=['auto', 'none', 'infonce', 'rkd', 'cosine', 'mse', 'mae', 'smoothl1'],
+                        choices=['auto', 'none', 'infonce', 'pair_infonce', 'soft_infonce', 'rkd', 'cosine', 'mse', 'mae', 'smoothl1'],
                         help=(
                             "Cách distill image feature. "
                             "auto giữ hành vi cũ; none tắt image distill; "
-                            "infonce dùng cross_loss; rkd dùng relational KD; "
+                            "infonce dùng cross_loss 2-view; pair_infonce dùng student->teacher CE 1 chiều; "
+                            "soft_infonce dùng teacher-soft KL; rkd dùng relational KD; "
                             "cosine/mse/mae/smoothl1 dùng feature regression."
                         ))
     parser.add_argument('--distill_photo_only', action='store_true', default=False,
@@ -135,16 +136,24 @@ if __name__ == "__main__":
     parser.add_argument('--distill_text', action='store_true', default=False,
                         help='Distill text features từ teacher text encoder sang student text prompts.')
     parser.add_argument('--text_distill_mode', type=str, default='infonce',
-                        choices=['infonce', 'cosine', 'mse', 'mae', 'smoothl1', 'rkd'],
+                        choices=['infonce', 'pair_infonce', 'soft_infonce', 'cosine', 'mse', 'mae', 'smoothl1', 'rkd'],
                         help=(
                             "Cách distill text feature khi bật --distill_text. "
-                            "infonce giữ hành vi cũ; cosine/mse/mae/smoothl1 dùng feature regression; "
+                            "infonce giữ hành vi cũ; pair_infonce dùng student->teacher CE 1 chiều; "
+                            "soft_infonce dùng teacher-soft KL; "
+                            "cosine/mse/mae/smoothl1 dùng feature regression; "
                             "rkd học quan hệ giữa các class text."
                         ))
     parser.add_argument('--lambda_text_distill', type=float, default=1.0,
                         help='Trọng số riêng cho text distillation loss.')
     parser.add_argument('--lambda_text_rkd', type=float, default=0.0,
                         help='Trọng số RKD phụ cho text prompt features, cộng song song với text_distill_mode hiện tại.')
+    parser.add_argument('--soft_infonce_teacher_weight', type=float, default=0.5,
+                        help='Tỷ lệ teacher-soft target trong soft_infonce; phần còn lại là hard pair target.')
+    parser.add_argument('--soft_infonce_temperature', type=float, default=0.07,
+                        help='Temperature cho student logits trong soft_infonce.')
+    parser.add_argument('--teacher_soft_infonce_temperature', type=float, default=0.07,
+                        help='Temperature cho teacher target distribution trong soft_infonce.')
     parser.add_argument('--distill_xsupcon', action='store_true', default=False,
                         help='Bật cross-modal supervised contrastive loss cho sketch->photo theo class label.')
     parser.add_argument('--lambda_xsupcon', type=float, default=1.0,

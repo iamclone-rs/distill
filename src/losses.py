@@ -65,6 +65,67 @@ def cross_loss(feature_1, feature_2, args):
     return nn.CrossEntropyLoss()(logits, labels)
 
 
+def soft_infonce_kd(
+    student_feat: torch.Tensor,
+    teacher_feat: torch.Tensor,
+    student_temperature: float = 0.07,
+    teacher_temperature: float = 0.07,
+    teacher_weight: float = 0.5,
+) -> torch.Tensor:
+    """
+    Teacher-weighted InfoNCE.
+
+    Hard InfoNCE says only the paired item is positive. This loss blends that
+    hard target with a teacher-teacher similarity distribution over the batch.
+    """
+    if student_feat.shape[-1] != teacher_feat.shape[-1]:
+        raise ValueError(
+            "soft_infonce cần student_feat và teacher_feat cùng chiều. "
+            "Với teacher 1024-dim, hãy bật --use_distill_proj hoặc --distill_text."
+        )
+
+    s = F.normalize(student_feat.float(), dim=-1)
+    t = F.normalize(teacher_feat.float(), dim=-1)
+    batch_size = s.shape[0]
+    labels = torch.arange(batch_size, device=s.device)
+
+    hard_target = F.one_hot(labels, num_classes=batch_size).float()
+    teacher_weight = max(0.0, min(1.0, float(teacher_weight)))
+
+    with torch.no_grad():
+        teacher_logits = (t @ t.T) / teacher_temperature
+        teacher_target = F.softmax(teacher_logits, dim=-1)
+        target = teacher_weight * teacher_target + (1.0 - teacher_weight) * hard_target
+
+    logits_st = (s @ t.T) / student_temperature
+    logits_ts = (t @ s.T) / student_temperature
+    loss_st = F.kl_div(F.log_softmax(logits_st, dim=-1), target, reduction='batchmean')
+    loss_ts = F.kl_div(F.log_softmax(logits_ts, dim=-1), target.T, reduction='batchmean')
+
+    return 0.5 * (loss_st + loss_ts)
+
+
+def pair_infonce_loss(
+    student_feat: torch.Tensor,
+    teacher_feat: torch.Tensor,
+    temperature: float = 0.07,
+) -> torch.Tensor:
+    """
+    One-way InfoNCE: student queries choose the paired teacher feature.
+    """
+    if student_feat.shape[-1] != teacher_feat.shape[-1]:
+        raise ValueError(
+            "pair_infonce cần student_feat và teacher_feat cùng chiều. "
+            "Với teacher 1024-dim, hãy bật --use_distill_proj hoặc --distill_text."
+        )
+
+    s = F.normalize(student_feat.float(), dim=-1)
+    t = F.normalize(teacher_feat.float(), dim=-1)
+    labels = torch.arange(s.shape[0], device=s.device)
+    logits = (s @ t.T) / temperature
+    return F.cross_entropy(logits, labels)
+
+
 def nt_xent(features_view1: torch.Tensor, features_view2: torch.Tensor):
     """
     NT-Xent for SimCLR
@@ -339,6 +400,32 @@ def loss_fn(args, model, features, mode='train'):
     elif image_distill_mode == "infonce":
         loss_distill_photo = cross_loss(photo_distill_features, photo_aug_features, args)
         loss_distill_sk    = cross_loss(sk_distill_features,    sk_aug_features,    args)
+    elif image_distill_mode == "pair_infonce":
+        loss_distill_photo = pair_infonce_loss(
+            photo_distill_features,
+            photo_aug_features,
+            temperature=getattr(args, "temperature", 0.07),
+        )
+        loss_distill_sk = pair_infonce_loss(
+            sk_distill_features,
+            sk_aug_features,
+            temperature=getattr(args, "temperature", 0.07),
+        )
+    elif image_distill_mode == "soft_infonce":
+        loss_distill_photo = soft_infonce_kd(
+            photo_distill_features,
+            photo_aug_features,
+            student_temperature=getattr(args, "soft_infonce_temperature", 0.07),
+            teacher_temperature=getattr(args, "teacher_soft_infonce_temperature", 0.07),
+            teacher_weight=getattr(args, "soft_infonce_teacher_weight", 0.5),
+        )
+        loss_distill_sk = soft_infonce_kd(
+            sk_distill_features,
+            sk_aug_features,
+            student_temperature=getattr(args, "soft_infonce_temperature", 0.07),
+            teacher_temperature=getattr(args, "teacher_soft_infonce_temperature", 0.07),
+            teacher_weight=getattr(args, "soft_infonce_teacher_weight", 0.5),
+        )
     elif image_distill_mode in ("cosine", "mse", "mae", "smoothl1"):
         loss_distill_photo = feature_regression_kd(
             photo_distill_features,
@@ -417,6 +504,36 @@ def loss_fn(args, model, features, mode='train'):
             loss_text_distill = (
                 cross_loss(photo_text_distill_features, teacher_text_features, args)
                 + cross_loss(sk_text_distill_features, teacher_text_features, args)
+            )
+        elif text_distill_mode == "pair_infonce":
+            loss_text_distill = (
+                pair_infonce_loss(
+                    photo_text_distill_features,
+                    teacher_text_features,
+                    temperature=getattr(args, "temperature", 0.07),
+                )
+                + pair_infonce_loss(
+                    sk_text_distill_features,
+                    teacher_text_features,
+                    temperature=getattr(args, "temperature", 0.07),
+                )
+            )
+        elif text_distill_mode == "soft_infonce":
+            loss_text_distill = (
+                soft_infonce_kd(
+                    photo_text_distill_features,
+                    teacher_text_features,
+                    student_temperature=getattr(args, "soft_infonce_temperature", 0.07),
+                    teacher_temperature=getattr(args, "teacher_soft_infonce_temperature", 0.07),
+                    teacher_weight=getattr(args, "soft_infonce_teacher_weight", 0.5),
+                )
+                + soft_infonce_kd(
+                    sk_text_distill_features,
+                    teacher_text_features,
+                    student_temperature=getattr(args, "soft_infonce_temperature", 0.07),
+                    teacher_temperature=getattr(args, "teacher_soft_infonce_temperature", 0.07),
+                    teacher_weight=getattr(args, "soft_infonce_teacher_weight", 0.5),
+                )
             )
         elif text_distill_mode in ("cosine", "mse", "mae", "smoothl1"):
             loss_text_distill = (
