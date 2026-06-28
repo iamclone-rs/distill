@@ -38,6 +38,10 @@ def relational_kd_loss(
 
 
 def cross_loss(feature_1, feature_2, args):
+    alpha = getattr(args, "soft_infonce_alpha", 0.0)
+    if alpha > 0:
+        return soft_cross_loss(feature_1, feature_2, args, alpha)
+
     labels = torch.cat([torch.arange(len(feature_1)) for _ in range(2)], dim=0)
     labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
     labels = labels.to(device)
@@ -63,6 +67,34 @@ def cross_loss(feature_1, feature_2, args):
     logits = logits / args.temperature
 
     return nn.CrossEntropyLoss()(logits, labels)
+
+
+def soft_cross_loss(feature_1, feature_2, args, alpha):
+    alpha = max(0.0, min(1.0, float(alpha)))
+
+    feature_1 = F.normalize(feature_1.float(), dim=1)
+    feature_2 = F.normalize(feature_2.float(), dim=1)
+    features = torch.cat((feature_1, feature_2), dim=0)
+    n = features.shape[0]
+
+    similarity_matrix = features @ features.T
+    mask = torch.eye(n, dtype=torch.bool, device=features.device)
+    logits = similarity_matrix[~mask].view(n, n - 1) / args.temperature
+
+    hard_pos = torch.cat([
+        torch.arange(len(feature_1), 2 * len(feature_1), device=features.device),
+        torch.arange(0, len(feature_1), device=features.device),
+    ], dim=0)
+    col_idx = torch.arange(n, device=features.device).expand(n, n)
+    candidate_idx = col_idx[~mask].view(n, n - 1)
+    hard_target = candidate_idx.eq(hard_pos[:, None]).float()
+
+    with torch.no_grad():
+        teacher_logits = similarity_matrix[~mask].view(n, n - 1) / args.temperature
+        teacher_target = F.softmax(teacher_logits, dim=-1)
+        target = (1.0 - alpha) * hard_target + alpha * teacher_target
+
+    return F.kl_div(F.log_softmax(logits, dim=-1), target, reduction='batchmean')
 
 
 def nt_xent(features_view1: torch.Tensor, features_view2: torch.Tensor):
