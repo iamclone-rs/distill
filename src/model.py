@@ -64,6 +64,12 @@ def _load_teacher(args):
     for p in teacher.parameters():
         p.requires_grad = False
     teacher = teacher.to(device)
+    if getattr(args, "quantize_fp16", False):
+        if device.type != "cuda":
+            print("[Teacher] quantize_fp16=True nhưng không có CUDA; giữ teacher ở FP32.")
+        else:
+            teacher = teacher.half()
+            print(f"[Teacher] {teacher_key} quantize_fp16=True -> teacher chạy FP16")
     print(f"[Teacher] {teacher_key} đã sẵn sàng (frozen, output 1024-dim) → RKD loss")
     return teacher
 
@@ -141,6 +147,11 @@ class CustomCLIP(nn.Module):
         self._use_distill_proj = getattr(cfg, "use_distill_proj", False)
         self._infer_with_distill_proj = getattr(cfg, "infer_with_distill_proj", False)
         self._distill_photo_only = getattr(cfg, "distill_photo_only", False)
+        self._teacher_fp16 = (
+            self._use_strong_teacher
+            and getattr(cfg, "quantize_fp16", False)
+            and device.type == "cuda"
+        )
         self._distill_proj_dim = 1024 if self._use_strong_teacher else 512
         if self._use_distill_proj:
             self.distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
@@ -195,6 +206,11 @@ class CustomCLIP(nn.Module):
         if not self._distill_text:
             return feature
         return self.text_distill_proj(feature.type(self.dtype))
+
+    def teacher_image_input(self, image):
+        if not self._use_strong_teacher:
+            return image
+        return image.half() if self._teacher_fp16 else image.float()
 
     def get_teacher_text_features(self, classnames):
         if not self._distill_text or not self._use_strong_teacher:
@@ -284,11 +300,11 @@ class CustomCLIP(nn.Module):
         
         if self._distill_photo_only:
             train_sketch_distill = getattr(self.cfg, "lambda_sketch_distill", 0.0) > 0
-            teacher_input = photo_aug_tensor.float() if self._use_strong_teacher else photo_aug_tensor
+            teacher_input = self.teacher_image_input(photo_aug_tensor)
             with torch.no_grad():
                 photo_aug_features = self.model_distill.encode_image(teacher_input)
                 if train_sketch_distill:
-                    sketch_teacher_input = sk_aug_tensor.float() if self._use_strong_teacher else sk_aug_tensor
+                    sketch_teacher_input = self.teacher_image_input(sk_aug_tensor)
                     sk_aug_features = self.model_distill.encode_image(sketch_teacher_input)
                 else:
                     sk_aug_features = photo_aug_features
@@ -296,8 +312,8 @@ class CustomCLIP(nn.Module):
             # Keep photo teacher target fixed, but let sketch target update
             # visual LayerNorm params for sketch-domain adaptation.
             if self._use_strong_teacher:
-                photo_teacher_input = photo_aug_tensor.float()
-                sketch_teacher_input = sk_aug_tensor.float()
+                photo_teacher_input = self.teacher_image_input(photo_aug_tensor)
+                sketch_teacher_input = self.teacher_image_input(sk_aug_tensor)
             else:
                 photo_teacher_input = photo_aug_tensor
                 sketch_teacher_input = sk_aug_tensor
@@ -310,7 +326,7 @@ class CustomCLIP(nn.Module):
             # Tiết kiệm ~50% thời gian teacher inference (ViT-H/14 rất chậm nếu gọi 2 lần)
             with torch.no_grad():
                 if self._use_strong_teacher:
-                    aug_cat = torch.cat([photo_aug_tensor, sk_aug_tensor], dim=0).float()
+                    aug_cat = self.teacher_image_input(torch.cat([photo_aug_tensor, sk_aug_tensor], dim=0))
                     aug_feats = self.model_distill.encode_image(aug_cat)          # (2B, 1024)
                 else:
                     aug_cat = torch.cat([photo_aug_tensor, sk_aug_tensor], dim=0)

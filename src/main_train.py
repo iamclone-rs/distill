@@ -102,6 +102,8 @@ if __name__ == "__main__":
                             "  dfn5b  → DFN5B-CLIP-H/14 1024-dim (cần open-clip-torch)\n"
                             "  laion_h → LAION CLIP-H/14 1024-dim (cần open-clip-torch)"
                         ))
+    parser.add_argument('--quantize_fp16', action='store_true', default=False,
+                        help='Chạy strong teacher dfn5b/laion_h ở FP16 để giảm VRAM và tăng tốc.')
     parser.add_argument('--lambda_distill', type=float, default=1.0,
                         help=(
                             "Trọng số cho distillation loss:\n"
