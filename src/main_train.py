@@ -120,8 +120,6 @@ if __name__ == "__main__":
                         help='Distill text features từ teacher text encoder sang student text prompts.')
     parser.add_argument('--lambda_text_distill', type=float, default=1.0,
                         help='Trọng số riêng cho text distillation loss.')
-    parser.add_argument('--soft_infonce_alpha', type=float, default=0.0,
-                        help='Pha teacher-soft target vào InfoNCE. 0.0 giữ InfoNCE gốc.')
     parser.add_argument('--infer_with_distill_proj', action='store_true', default=False,
                         help='Dùng projected feature cho validation/inference retrieval.')
     parser.add_argument('--rkd_weight', type=float, default=0.5,
