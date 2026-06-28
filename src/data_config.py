@@ -17,7 +17,7 @@ UNSEEN_CLASSES = {
         "wine_bottle", 
         "deer", 
         "chicken", 
-        "hotdog", 
+        "airplane", 
         "wheelchair", 
         "tank", 
         "umbrella", 

@@ -108,95 +108,16 @@ if __name__ == "__main__":
                             "  clip32: 1.0 (mặc định, scale tương đương cls/nt_xent)\n"
                             "  dfn5b:  khuyến nghị 10.0–50.0 (RKD scale nhỏ hơn ~10–50x)"
                         ))
-    parser.add_argument('--lambda_photo_distill', type=float, default=None,
-                        help=(
-                            "Trọng số riêng cho photo image distill. "
-                            "Nếu set flag này, image distill dùng "
-                            "lambda_photo_distill * photo_loss + lambda_sketch_distill * sketch_loss."
-                        ))
     parser.add_argument('--use_distill_proj', action='store_true', default=False,
                         help='Thêm linear projection student sang teacher dim rồi distill bằng cross_loss InfoNCE.')
-    parser.add_argument('--image_distill_mode', type=str, default='auto',
-                        choices=['auto', 'none', 'infonce', 'pair_infonce', 'soft_infonce', 'rkd', 'cosine', 'mse', 'mae', 'smoothl1'],
-                        help=(
-                            "Cách distill image feature. "
-                            "auto giữ hành vi cũ; none tắt image distill; "
-                            "infonce dùng cross_loss 2-view; pair_infonce dùng student->teacher CE 1 chiều; "
-                            "soft_infonce dùng teacher-soft KL; rkd dùng relational KD; "
-                            "cosine/mse/mae/smoothl1 dùng feature regression."
-                        ))
     parser.add_argument('--distill_photo_only', action='store_true', default=False,
                         help='Chỉ distill nhánh photo từ teacher; sketch học qua CE/triplet/NT-Xent.')
     parser.add_argument('--lambda_sketch_distill', type=float, default=0.0,
-                        help='Trọng số riêng cho sketch image distill khi dùng lambda_photo_distill hoặc distill_photo_only.')
-    parser.add_argument('--lambda_photo_rkd', type=float, default=0.0,
-                        help='Trọng số RKD phụ cho photo image, cộng song song với image_distill_mode hiện tại.')
-    parser.add_argument('--lambda_sketch_rkd', type=float, default=0.0,
-                        help='Trọng số RKD phụ cho sketch image, cộng song song với image_distill_mode hiện tại.')
+                        help='Trọng số sketch distill phụ khi dùng distill_photo_only.')
     parser.add_argument('--distill_text', action='store_true', default=False,
                         help='Distill text features từ teacher text encoder sang student text prompts.')
-    parser.add_argument('--text_distill_mode', type=str, default='infonce',
-                        choices=['infonce', 'pair_infonce', 'soft_infonce', 'cosine', 'mse', 'mae', 'smoothl1', 'rkd'],
-                        help=(
-                            "Cách distill text feature khi bật --distill_text. "
-                            "infonce giữ hành vi cũ; pair_infonce dùng student->teacher CE 1 chiều; "
-                            "soft_infonce dùng teacher-soft KL; "
-                            "cosine/mse/mae/smoothl1 dùng feature regression; "
-                            "rkd học quan hệ giữa các class text."
-                        ))
     parser.add_argument('--lambda_text_distill', type=float, default=1.0,
                         help='Trọng số riêng cho text distillation loss.')
-    parser.add_argument('--lambda_text_rkd', type=float, default=0.0,
-                        help='Trọng số RKD phụ cho text prompt features, cộng song song với text_distill_mode hiện tại.')
-    parser.add_argument('--soft_infonce_teacher_weight', type=float, default=0.5,
-                        help='Tỷ lệ teacher-soft target trong soft_infonce; phần còn lại là hard pair target.')
-    parser.add_argument('--soft_infonce_temperature', type=float, default=0.07,
-                        help='Temperature cho student logits trong soft_infonce.')
-    parser.add_argument('--teacher_soft_infonce_temperature', type=float, default=0.07,
-                        help='Temperature cho teacher target distribution trong soft_infonce.')
-    parser.add_argument('--distill_xsupcon', action='store_true', default=False,
-                        help='Bật cross-modal supervised contrastive loss cho sketch->photo theo class label.')
-    parser.add_argument('--lambda_xsupcon', type=float, default=1.0,
-                        help='Trọng số cho cross-modal supervised contrastive loss.')
-    parser.add_argument('--xsupcon_temperature', type=float, default=0.07,
-                        help='Temperature cho cross-modal supervised contrastive loss.')
-    parser.add_argument('--xsupcon_bidirectional', action='store_true', default=False,
-                        help='Thêm chiều photo->sketch cho cross-modal supervised contrastive loss.')
-    parser.add_argument('--distill_rank', action='store_true', default=False,
-                        help='Bật text-guided ranking distillation cho sketch->photo retrieval.')
-    parser.add_argument('--lambda_rank_distill', type=float, default=1.0,
-                        help='Trọng số cho ranking distillation loss.')
-    parser.add_argument('--rank_distill_temperature', type=float, default=0.07,
-                        help='Temperature cho student ranking distribution.')
-    parser.add_argument('--teacher_rank_temperature', type=float, default=0.07,
-                        help='Temperature cho teacher ranking distribution.')
-    parser.add_argument('--distill_xmodal', action='store_true', default=False,
-                        help='Bật cross-modal similarity matrix distillation cho sketch->photo retrieval.')
-    parser.add_argument('--lambda_xmodal_distill', type=float, default=1.0,
-                        help='Trọng số cho cross-modal similarity matrix distillation.')
-    parser.add_argument('--xmodal_distill_mode', type=str, default='smoothl1',
-                        choices=['mse', 'smoothl1'],
-                        help='Loss dùng để match ma trận similarity sketch->photo.')
-    parser.add_argument('--distill_listwise', action='store_true', default=False,
-                        help='Bật class-aware listwise distillation cho sketch->photo retrieval.')
-    parser.add_argument('--lambda_listwise_distill', type=float, default=1.0,
-                        help='Trọng số cho class-aware listwise distillation.')
-    parser.add_argument('--listwise_teacher_weight', type=float, default=0.5,
-                        help='Tỷ lệ teacher soft target trong listwise loss; phần còn lại là class-positive target.')
-    parser.add_argument('--listwise_distill_temperature', type=float, default=0.07,
-                        help='Temperature cho student listwise logits.')
-    parser.add_argument('--teacher_listwise_temperature', type=float, default=0.07,
-                        help='Temperature cho teacher listwise logits.')
-    parser.add_argument('--listwise_bidirectional', action='store_true', default=False,
-                        help='Thêm chiều photo->sketch cho listwise distillation.')
-    parser.add_argument('--distill_method', type=str, default='manual',
-                        choices=['manual', 'rank', 'xmodal', 'listwise'],
-                        help=(
-                            "Preset distill. manual dùng các flag riêng; "
-                            "rank bật ranking distill; "
-                            "xmodal bật cross-modal matrix distill; "
-                            "listwise bật class-aware listwise distill."
-                        ))
     parser.add_argument('--infer_with_distill_proj', action='store_true', default=False,
                         help='Dùng projected feature cho validation/inference retrieval.')
     parser.add_argument('--rkd_weight', type=float, default=0.5,
@@ -212,22 +133,6 @@ if __name__ == "__main__":
 
     
     args = parser.parse_args()
-    if args.distill_method == 'rank':
-        args.use_distill_proj = False
-        args.distill_rank = True
-        args.distill_photo_only = True
-        args.image_distill_mode = 'none'
-    elif args.distill_method == 'xmodal':
-        args.use_distill_proj = False
-        args.distill_xmodal = True
-        args.distill_photo_only = True
-        args.image_distill_mode = 'none'
-    elif args.distill_method == 'listwise':
-        args.use_distill_proj = False
-        args.distill_listwise = True
-        args.distill_photo_only = True
-        args.image_distill_mode = 'none'
-
     logger = TensorBoardLogger('tb_logs', name=args.exp_name)
     
     checkpoint_callback = ModelCheckpoint(
