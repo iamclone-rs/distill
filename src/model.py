@@ -160,13 +160,19 @@ class CustomCLIP(nn.Module):
                 f"student feature 512 -> {self._distill_proj_dim}"
             )
         self._distill_text = getattr(cfg, "distill_text", False)
+        self._distill_semantic_proto = getattr(cfg, "distill_semantic_proto", False)
+        self._need_teacher_text = self._distill_text or self._distill_semantic_proto
         if self._distill_text:
             self.text_distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
+        if self._need_teacher_text:
             self._teacher_text_cache = {}
+        if self._distill_text:
             print(
                 "[Distill] distill_text=True -> "
                 f"student text 512 -> {self._distill_proj_dim}"
             )
+        if self._distill_semantic_proto:
+            print("[Distill] distill_semantic_proto=True -> teacher text prototypes")
         self._train_teacher_ln = getattr(cfg, "train_teacher_ln", False)
         if self._train_teacher_ln:
             teacher_visual = getattr(self.model_distill, "visual", self.model_distill)
@@ -213,7 +219,7 @@ class CustomCLIP(nn.Module):
         return image.half() if self._teacher_fp16 else image.float()
 
     def get_teacher_text_features(self, classnames):
-        if not self._distill_text or not self._use_strong_teacher:
+        if not self._need_teacher_text or not self._use_strong_teacher:
             return None
 
         cache_key = tuple(classnames)

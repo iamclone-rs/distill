@@ -120,6 +120,14 @@ if __name__ == "__main__":
                         help='Distill text features từ teacher text encoder sang student text prompts.')
     parser.add_argument('--lambda_text_distill', type=float, default=1.0,
                         help='Trọng số riêng cho text distillation loss.')
+    parser.add_argument('--distill_semantic_proto', action='store_true', default=False,
+                        help='Dùng teacher text features làm semantic prototypes để distill photo/sketch.')
+    parser.add_argument('--lambda_photo_proto', type=float, default=0.0,
+                        help='Trọng số semantic prototype loss cho photo branch.')
+    parser.add_argument('--lambda_sketch_proto', type=float, default=0.0,
+                        help='Trọng số semantic prototype loss cho sketch branch.')
+    parser.add_argument('--proto_temperature', type=float, default=0.07,
+                        help='Temperature cho semantic prototype distillation.')
     parser.add_argument('--infer_with_distill_proj', action='store_true', default=False,
                         help='Dùng projected feature cho validation/inference retrieval.')
     parser.add_argument('--rkd_weight', type=float, default=0.5,

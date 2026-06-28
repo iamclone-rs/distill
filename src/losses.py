@@ -121,6 +121,27 @@ def projected_kd_loss(
     return loss_cos + loss_contrast + rkd_weight * loss_rkd
 
 
+def semantic_proto_loss(
+    student_feat: torch.Tensor,
+    teacher_text_feat: torch.Tensor,
+    label: torch.Tensor,
+    temperature: float = 0.07,
+) -> torch.Tensor:
+    """
+    Use frozen teacher text features as semantic class prototypes.
+    """
+    if student_feat.shape[-1] != teacher_text_feat.shape[-1]:
+        raise ValueError(
+            "semantic_proto_loss cần student_feat và teacher_text_feat cùng chiều. "
+            "Với teacher 1024-dim, hãy bật --use_distill_proj."
+        )
+
+    student_feat = F.normalize(student_feat.float(), dim=-1)
+    teacher_text_feat = F.normalize(teacher_text_feat.float(), dim=-1)
+    logits = (student_feat @ teacher_text_feat.T) / temperature
+    return F.cross_entropy(logits, label)
+
+
 def loss_fn(args, model, features, mode='train'):
     photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
         neg_features, label, pos_logits, sk_logits, photo_features, sk_features = features[:10]
@@ -187,6 +208,33 @@ def loss_fn(args, model, features, mode='train'):
             cross_loss(photo_text_distill_features, teacher_text_features, args)
             + cross_loss(sk_text_distill_features, teacher_text_features, args)
         )
+
+    loss_semantic_proto = torch.tensor(0.0, device=pos_logits.device)
+    if getattr(args, "distill_semantic_proto", False):
+        if teacher_text_features is None:
+            raise ValueError(
+                "distill_semantic_proto cần strong teacher có text encoder, "
+                "ví dụ --teacher dfn5b hoặc --teacher laion_h."
+            )
+
+        proto_temperature = getattr(args, "proto_temperature", 0.07)
+        lambda_photo_proto = getattr(args, "lambda_photo_proto", 0.0)
+        lambda_sketch_proto = getattr(args, "lambda_sketch_proto", 0.0)
+
+        if lambda_photo_proto > 0:
+            loss_semantic_proto = loss_semantic_proto + lambda_photo_proto * semantic_proto_loss(
+                photo_distill_features,
+                teacher_text_features,
+                label,
+                temperature=proto_temperature,
+            )
+        if lambda_sketch_proto > 0:
+            loss_semantic_proto = loss_semantic_proto + lambda_sketch_proto * semantic_proto_loss(
+                sk_distill_features,
+                teacher_text_features,
+                label,
+                temperature=proto_temperature,
+            )
     
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(
@@ -216,6 +264,7 @@ def loss_fn(args, model, features, mode='train'):
         + loss_triplet \
         + lambda_distill * loss_distill \
         + lambda_text_distill * loss_text_distill \
+        + loss_semantic_proto \
         + nt_xent_loss
     )
     
