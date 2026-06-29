@@ -196,34 +196,42 @@ def compute_loss(wrapper: TeacherWrapper, batch: tuple, classnames: list, args) 
 @torch.no_grad()
 def validate(wrapper: TeacherWrapper, sk_loader: DataLoader, ph_loader: DataLoader, args) -> float:
     wrapper.eval()
+    use_amp = device.type == "cuda"
 
     sk_feats, sk_labels = [], []
     ph_feats, ph_labels = [], []
 
+    # ── Extract features (FP16 autocast for 2-3x speedup on GPU) ──────────────
     for images, labels in tqdm(sk_loader, desc="  Extract sketch", leave=False):
-        feat = wrapper.encode_sketch(images.to(device))
-        feat = F.normalize(feat, dim=-1)
+        with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+            feat = wrapper.encode_sketch(images.to(device))
+        feat = F.normalize(feat.float(), dim=-1)
         sk_feats.append(feat.cpu())
         sk_labels.append(labels)
 
     for images, labels in tqdm(ph_loader, desc="  Extract photo ", leave=False):
-        feat = wrapper.encode_photo(images.to(device))
-        feat = F.normalize(feat, dim=-1)
+        with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+            feat = wrapper.encode_photo(images.to(device))
+        feat = F.normalize(feat.float(), dim=-1)
         ph_feats.append(feat.cpu())
         ph_labels.append(labels)
 
-    sk_feats  = torch.cat(sk_feats)
-    ph_feats  = torch.cat(ph_feats)
+    sk_feats  = torch.cat(sk_feats)            # (Nq, D)
+    ph_feats  = torch.cat(ph_feats)            # (Ng, D)
     sk_labels = torch.cat(sk_labels).numpy()
     ph_labels = torch.cat(ph_labels).numpy()
 
     map_k = 200 if args.dataset == "sketchy_2" else 0
     p_k   = 200 if args.dataset in ("sketchy_2", "quickdraw") else 100
 
+    # ── Retrieval: batched matmul thay vì vòng lặp per-query ──────────────────
+    # sim_matrix: (Nq, Ng)  — cosine similarity vì cả 2 đã normalize
+    sim_matrix = sk_feats @ ph_feats.T         # (Nq, Ng)
+
     aps, precs = [], []
-    for idx, sk_feat in enumerate(sk_feats):
+    for idx in range(len(sk_feats)):
         cat    = sk_labels[idx]
-        dist   = F.cosine_similarity(sk_feat.unsqueeze(0), ph_feats)
+        dist   = sim_matrix[idx]               # (Ng,) — đã tính sẵn
         target = torch.tensor(ph_labels == cat, dtype=torch.bool)
 
         ap = (
