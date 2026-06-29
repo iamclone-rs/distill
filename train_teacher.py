@@ -28,6 +28,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 import open_clip
+from tqdm import tqdm
 from torchmetrics.functional import retrieval_average_precision
 
 from src.sketchy_dataset import TrainDataset, ValidDataset
@@ -199,13 +200,13 @@ def validate(wrapper: TeacherWrapper, sk_loader: DataLoader, ph_loader: DataLoad
     sk_feats, sk_labels = [], []
     ph_feats, ph_labels = [], []
 
-    for images, labels in sk_loader:
+    for images, labels in tqdm(sk_loader, desc="  Extract sketch", leave=False):
         feat = wrapper.encode_sketch(images.to(device))
         feat = F.normalize(feat, dim=-1)
         sk_feats.append(feat.cpu())
         sk_labels.append(labels)
 
-    for images, labels in ph_loader:
+    for images, labels in tqdm(ph_loader, desc="  Extract photo ", leave=False):
         feat = wrapper.encode_photo(images.to(device))
         feat = F.normalize(feat, dim=-1)
         ph_feats.append(feat.cpu())
@@ -342,7 +343,8 @@ def main():
         wrapper.train()
         epoch_loss = 0.0
 
-        for step, batch in enumerate(train_loader):
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", dynamic_ncols=True)
+        for batch in pbar:
             optimizer.zero_grad()
 
             with torch.cuda.amp.autocast(enabled=use_amp):
@@ -355,13 +357,8 @@ def main():
             scaler.update()
 
             epoch_loss += loss.item()
-
-            if (step + 1) % args.log_every == 0:
-                print(
-                    f"  [Ep {epoch}/{args.epochs} | step {step+1}/{len(train_loader)}]"
-                    f"  loss={loss.item():.4f}"
-                    f"  cls={lc:.3f}  tri={lt:.3f}  ntx={ln:.3f}"
-                )
+            pbar.set_postfix(loss=f"{loss.item():.4f}", cls=f"{lc:.3f}",
+                             tri=f"{lt:.3f}", ntx=f"{ln:.3f}")
 
         avg = epoch_loss / len(train_loader)
         print(f"\n[Epoch {epoch}] avg_loss={avg:.4f}")
