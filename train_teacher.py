@@ -256,6 +256,7 @@ def main():
     parser.add_argument("--data_split",      type=int,   default=-1)
     parser.add_argument("--gzs",             action="store_true", default=False)
     parser.add_argument("--no_aug",          action="store_true", default=False)
+    parser.add_argument("--visualize",       action="store_true", default=False)
 
     # Training
     parser.add_argument("--epochs",          type=int,   default=5)
