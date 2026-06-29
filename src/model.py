@@ -37,13 +37,6 @@ def _needs_strong_teacher(args):
         getattr(args, "lambda_photo_distill", 0.0) > 0
         or getattr(args, "lambda_sketch_distill", 0.0) > 0
         or getattr(args, "lambda_text_distill", 0.0) > 0
-        or (
-            getattr(args, "distill_semantic_proto", False)
-            and (
-                getattr(args, "lambda_photo_proto", 0.0) > 0
-                or getattr(args, "lambda_sketch_proto", 0.0) > 0
-            )
-        )
         or getattr(args, "train_teacher_ln", False)
     )
 
@@ -174,13 +167,6 @@ class CustomCLIP(nn.Module):
             self._lambda_photo_distill > 0 or self._lambda_sketch_distill > 0
         )
         self._distill_text = self._lambda_text_distill > 0
-        self._distill_semantic_proto = (
-            getattr(cfg, "distill_semantic_proto", False)
-            and (
-                getattr(cfg, "lambda_photo_proto", 0.0) > 0
-                or getattr(cfg, "lambda_sketch_proto", 0.0) > 0
-            )
-        )
         self._distill_proj_requested = getattr(cfg, "use_distill_proj", False)
         self._infer_with_distill_proj = getattr(cfg, "infer_with_distill_proj", False)
         self._teacher_fp16 = (
@@ -191,7 +177,6 @@ class CustomCLIP(nn.Module):
         self._distill_proj_dim = 1024 if self._use_strong_teacher else 512
         self._use_distill_proj = self._distill_proj_requested and (
             self._image_distill_active
-            or self._distill_semantic_proto
             or self._infer_with_distill_proj
         )
         if self._use_distill_proj:
@@ -200,7 +185,7 @@ class CustomCLIP(nn.Module):
                 "[Distill] use_distill_proj=True -> "
                 f"student feature 512 -> {self._distill_proj_dim}"
             )
-        self._need_teacher_text = self._distill_text or self._distill_semantic_proto
+        self._need_teacher_text = self._distill_text
         if self._distill_text:
             self.text_distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
         if self._need_teacher_text:
@@ -210,8 +195,6 @@ class CustomCLIP(nn.Module):
                 "[Distill] distill_text=True -> "
                 f"student text 512 -> {self._distill_proj_dim}"
             )
-        if self._distill_semantic_proto:
-            print("[Distill] distill_semantic_proto=True -> teacher text prototypes")
         print(
             "[Distill] active branches -> "
             f"photo={self._lambda_photo_distill > 0} ({self._lambda_photo_distill}), "

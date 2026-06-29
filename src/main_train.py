@@ -58,6 +58,15 @@ def normalize_distill_args(args):
     )
 
 
+def print_base_loss_weights(args):
+    print(
+        "[Loss] base weights -> "
+        f"cls={args.lambda_cls}, "
+        f"triplet={args.lambda_triplet}, "
+        f"nt_xent={args.lambda_nt_xent}"
+    )
+
+
 def get_datasets(args):
     seed = 42
     random.seed(seed)
@@ -119,6 +128,12 @@ if __name__ == "__main__":
     parser.add_argument("--gamma", type=float, default=0.1)
     parser.add_argument("--beta", type=float, default=0.1)
     parser.add_argument("--lambd", type=float, default=0.1)
+    parser.add_argument("--lambda_cls", type=float, default=1.0,
+                        help="Trọng số cho classification loss: CE(photo,text)+CE(sketch,text).")
+    parser.add_argument("--lambda_triplet", type=float, default=1.0,
+                        help="Trọng số cho triplet loss sketch-photo-negative.")
+    parser.add_argument("--lambda_nt_xent", type=float, default=1.0,
+                        help="Trọng số cho NT-Xent loss giữa photo và sketch student.")
     
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument('--batch_size', type=int, default=32)
@@ -167,14 +182,6 @@ if __name__ == "__main__":
                         help='Legacy: bật text distillation nếu chưa dùng lambda_text_distill trực tiếp.')
     parser.add_argument('--lambda_text_distill', type=float, default=None,
                         help='Trọng số riêng cho text distillation loss.')
-    parser.add_argument('--distill_semantic_proto', action='store_true', default=False,
-                        help='Dùng teacher text features làm semantic prototypes để distill photo/sketch.')
-    parser.add_argument('--lambda_photo_proto', type=float, default=0.0,
-                        help='Trọng số semantic prototype loss cho photo branch.')
-    parser.add_argument('--lambda_sketch_proto', type=float, default=0.0,
-                        help='Trọng số semantic prototype loss cho sketch branch.')
-    parser.add_argument('--proto_temperature', type=float, default=0.07,
-                        help='Temperature cho semantic prototype distillation.')
     parser.add_argument('--infer_with_distill_proj', action='store_true', default=False,
                         help='Dùng projected feature cho validation/inference retrieval.')
     parser.add_argument('--rkd_weight', type=float, default=0.5,
@@ -191,6 +198,7 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     normalize_distill_args(args)
+    print_base_loss_weights(args)
     logger = TensorBoardLogger('tb_logs', name=args.exp_name)
     
     checkpoint_callback = ModelCheckpoint(
