@@ -192,6 +192,11 @@ if __name__ == "__main__":
                             "Photo teacher target vẫn chạy no_grad."
                         ))
     
+    parser.add_argument('--teacher_ckpt', type=str, default=None,
+                        help=(\
+                            "Path đến file .pt từ train_teacher.py (Stage 1 fine-tuned DFN5B). "
+                            "Nếu có, load weights này vào teacher thay vì dùng pretrained gốc."
+                        ))
     parser.add_argument('--exp_name', type=str, default='Co_prompt')
 
 

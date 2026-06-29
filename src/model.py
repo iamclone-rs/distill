@@ -49,6 +49,11 @@ def _load_teacher(args):
         'clip32'  → None  (dùng clip_model_distill ViT-B/32, hành vi gốc)
         'dfn5b'   → DFN5B-CLIP-H/14 (1024-dim, frozen, via open_clip)
         'laion_h' → LAION CLIP-H/14 (1024-dim, frozen, via open_clip)
+
+    args.teacher_ckpt (tuỳ chọn):
+        Path đến file .pt từ train_teacher.py (Stage 1 fine-tuned).
+        Nếu có, load dfn5b_state_dict từ checkpoint vào model thay vì dùng
+        pretrained weights gốc.
     """
     teacher_key = getattr(args, "teacher", "clip32")
 
@@ -73,8 +78,26 @@ def _load_teacher(args):
         )
 
     model_name, pretrained = _TEACHER_REGISTRY[teacher_key]
-    print(f"[Teacher] Đang load {teacher_key} ({model_name}, pretrained={pretrained})...")
-    teacher, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
+
+    teacher_ckpt = getattr(args, "teacher_ckpt", None)
+    if teacher_ckpt and os.path.exists(teacher_ckpt):
+        # Load architecture rỗng (pretrained=None để không download weights gốc)
+        print(f"[Teacher] Đang load architecture {teacher_key} ({model_name})...")
+        teacher, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=None)
+        print(f"[Teacher] Load fine-tuned weights từ: {teacher_ckpt}")
+        ckpt = torch.load(teacher_ckpt, map_location="cpu")
+        missing, unexpected = teacher.load_state_dict(ckpt["dfn5b_state_dict"], strict=True)
+        if missing:
+            print(f"[Teacher] Missing keys: {missing[:5]}")
+        if unexpected:
+            print(f"[Teacher] Unexpected keys: {unexpected[:5]}")
+        print(f"[Teacher] Fine-tuned checkpoint loaded (Stage 1 mAP={ckpt.get('mAP', 'N/A'):.4f})")
+    else:
+        if teacher_ckpt:
+            print(f"[Teacher] WARNING: --teacher_ckpt '{teacher_ckpt}' không tồn tại, dùng pretrained gốc.")
+        print(f"[Teacher] Đang load {teacher_key} ({model_name}, pretrained={pretrained})...")
+        teacher, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
+
     teacher.text_tokenizer = open_clip.get_tokenizer(model_name)
     teacher.eval()
     for p in teacher.parameters():
