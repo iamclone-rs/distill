@@ -165,41 +165,32 @@ def loss_fn(args, model, features, mode='train'):
     loss_ce_sk = F.cross_entropy(sk_logits, label)
     loss_cls = loss_ce_photo + loss_ce_sk
 
-    # Lựa chọn distill loss:
-    # - clip32 teacher (cùng dim 512) → cross_loss InfoNCE
-    # - dfn5b + use_distill_proj      → Linear 512->1024 rồi cross_loss InfoNCE
-    # - dfn5b không projection        → relational_kd_loss vì khác dim
-    if getattr(args, "use_distill_proj", False):
-        loss_distill_photo = cross_loss(photo_distill_features, photo_aug_features, args)
-        loss_distill_sk    = cross_loss(sk_distill_features,    sk_aug_features,    args)
-    elif photo_aug_features.shape[-1] != photo_features.shape[-1]:
-        loss_distill_photo = relational_kd_loss(photo_features, photo_aug_features)
-        loss_distill_sk    = relational_kd_loss(sk_features,    sk_aug_features)
-    else:
-        loss_distill_photo = cross_loss(photo_features, photo_aug_features, args)
-        loss_distill_sk    = cross_loss(sk_features,    sk_aug_features,    args)
-    
-    # loss_distill_photo = F.mse_loss(photo_features, photo_aug_features)
-    # loss_distill_sk = F.mse_loss(sk_features, sk_aug_features)
-    
-    # cos = torch.nn.CosineSimilarity(dim=1, eps=1e-07)
-    # photo_score = cos(photo_features, photo_aug_features)
-    # sketch_score = cos(sk_features, sk_aug_features)
-    # loss_distill_photo = 1.0 - torch.mean(photo_score)
-    # loss_distill_sk = 1.0 - torch.mean(sketch_score)
-    
-    # loss_distill_photo = F.l1_loss(photo_features, photo_aug_features)
-    # loss_distill_sk = F.l1_loss(sk_features, sk_aug_features)
-    
-    if getattr(args, "distill_photo_only", False):
-        lambda_sketch_distill = getattr(args, "lambda_sketch_distill", 0.0)
-        loss_distill = loss_distill_photo + lambda_sketch_distill * loss_distill_sk
-    else:
-        loss_distill = loss_distill_sk + loss_distill_photo 
+    lambda_photo_distill = getattr(args, "lambda_photo_distill", 0.0)
+    lambda_sketch_distill = getattr(args, "lambda_sketch_distill", 0.0)
+    lambda_text_distill = getattr(args, "lambda_text_distill", 0.0)
+    loss_image_distill = torch.tensor(0.0, device=pos_logits.device)
+
+    if lambda_photo_distill > 0:
+        if getattr(args, "use_distill_proj", False):
+            loss_distill_photo = cross_loss(photo_distill_features, photo_aug_features, args)
+        elif photo_aug_features.shape[-1] != photo_features.shape[-1]:
+            loss_distill_photo = relational_kd_loss(photo_features, photo_aug_features)
+        else:
+            loss_distill_photo = cross_loss(photo_features, photo_aug_features, args)
+        loss_image_distill = loss_image_distill + lambda_photo_distill * loss_distill_photo
+
+    if lambda_sketch_distill > 0:
+        if getattr(args, "use_distill_proj", False):
+            loss_distill_sk = cross_loss(sk_distill_features, sk_aug_features, args)
+        elif sk_aug_features.shape[-1] != sk_features.shape[-1]:
+            loss_distill_sk = relational_kd_loss(sk_features, sk_aug_features)
+        else:
+            loss_distill_sk = cross_loss(sk_features, sk_aug_features, args)
+        loss_image_distill = loss_image_distill + lambda_sketch_distill * loss_distill_sk
 
     loss_text_distill = torch.tensor(0.0, device=pos_logits.device)
     if (
-        getattr(args, "distill_text", False)
+        lambda_text_distill > 0
         and teacher_text_features is not None
         and photo_text_distill_features is not None
         and sk_text_distill_features is not None
@@ -252,17 +243,10 @@ def loss_fn(args, model, features, mode='train'):
     else:
         nt_xent_loss = nt_xent(photo_features, sk_features)
     
-    # lambda_distill: điều chỉnh trọng số loss distillation
-    # - clip32 teacher: lambda_distill=1.0 là hợp lý (scale tương đương cls/nt_xent)
-    # - dfn5b  teacher: lambda_distill cần lớn hơn (~10–50) vì RKD scale nhỏ hơn
-    #   gợi ý: bắt đầu với lambda_distill=10.0 khi dùng dfn5b
-    lambda_distill = getattr(args, 'lambda_distill', 1.0)
-    lambda_text_distill = getattr(args, 'lambda_text_distill', 1.0)
-    
     total_loss = (
         loss_cls \
         + loss_triplet \
-        + lambda_distill * loss_distill \
+        + loss_image_distill \
         + lambda_text_distill * loss_text_distill \
         + loss_semantic_proto \
         + nt_xent_loss

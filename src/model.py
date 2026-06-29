@@ -29,6 +29,25 @@ _TEACHER_REGISTRY = {
     "laion_h"     : ("ViT-H-14",             "laion2b_s32b_b79k"),
 }
 
+
+def _needs_strong_teacher(args):
+    if getattr(args, "teacher", "clip32") == "clip32":
+        return False
+    return (
+        getattr(args, "lambda_photo_distill", 0.0) > 0
+        or getattr(args, "lambda_sketch_distill", 0.0) > 0
+        or getattr(args, "lambda_text_distill", 0.0) > 0
+        or (
+            getattr(args, "distill_semantic_proto", False)
+            and (
+                getattr(args, "lambda_photo_proto", 0.0) > 0
+                or getattr(args, "lambda_sketch_proto", 0.0) > 0
+            )
+        )
+        or getattr(args, "train_teacher_ln", False)
+    )
+
+
 def _load_teacher(args):
     """
     Trả về strong_teacher model (frozen) hoặc None.
@@ -42,6 +61,10 @@ def _load_teacher(args):
 
     if teacher_key == "clip32":
         print("[Teacher] clip32 (ViT-B/32) — hành vi gốc, cross_loss")
+        return None
+
+    if not _needs_strong_teacher(args):
+        print(f"[Teacher] {teacher_key} được chọn nhưng distill weight = 0 -> bỏ qua strong teacher")
         return None
 
     if teacher_key not in _TEACHER_REGISTRY:
@@ -70,7 +93,7 @@ def _load_teacher(args):
         else:
             teacher = teacher.half()
             print(f"[Teacher] {teacher_key} quantize_fp16=True -> teacher chạy FP16")
-    print(f"[Teacher] {teacher_key} đã sẵn sàng (frozen, output 1024-dim) → RKD loss")
+    print(f"[Teacher] {teacher_key} đã sẵn sàng (frozen, output 1024-dim)")
     return teacher
 
 # ---------------------------------------------------------------------------
@@ -144,23 +167,39 @@ class CustomCLIP(nn.Module):
         else:
             self.model_distill = clip_model_distill
             self._use_strong_teacher = False
-        self._use_distill_proj = getattr(cfg, "use_distill_proj", False)
+        self._lambda_photo_distill = getattr(cfg, "lambda_photo_distill", 0.0)
+        self._lambda_sketch_distill = getattr(cfg, "lambda_sketch_distill", 0.0)
+        self._lambda_text_distill = getattr(cfg, "lambda_text_distill", 0.0)
+        self._image_distill_active = (
+            self._lambda_photo_distill > 0 or self._lambda_sketch_distill > 0
+        )
+        self._distill_text = self._lambda_text_distill > 0
+        self._distill_semantic_proto = (
+            getattr(cfg, "distill_semantic_proto", False)
+            and (
+                getattr(cfg, "lambda_photo_proto", 0.0) > 0
+                or getattr(cfg, "lambda_sketch_proto", 0.0) > 0
+            )
+        )
+        self._distill_proj_requested = getattr(cfg, "use_distill_proj", False)
         self._infer_with_distill_proj = getattr(cfg, "infer_with_distill_proj", False)
-        self._distill_photo_only = getattr(cfg, "distill_photo_only", False)
         self._teacher_fp16 = (
             self._use_strong_teacher
             and getattr(cfg, "quantize_fp16", False)
             and device.type == "cuda"
         )
         self._distill_proj_dim = 1024 if self._use_strong_teacher else 512
+        self._use_distill_proj = self._distill_proj_requested and (
+            self._image_distill_active
+            or self._distill_semantic_proto
+            or self._infer_with_distill_proj
+        )
         if self._use_distill_proj:
             self.distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
             print(
                 "[Distill] use_distill_proj=True -> "
                 f"student feature 512 -> {self._distill_proj_dim}"
             )
-        self._distill_text = getattr(cfg, "distill_text", False)
-        self._distill_semantic_proto = getattr(cfg, "distill_semantic_proto", False)
         self._need_teacher_text = self._distill_text or self._distill_semantic_proto
         if self._distill_text:
             self.text_distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
@@ -173,6 +212,12 @@ class CustomCLIP(nn.Module):
             )
         if self._distill_semantic_proto:
             print("[Distill] distill_semantic_proto=True -> teacher text prototypes")
+        print(
+            "[Distill] active branches -> "
+            f"photo={self._lambda_photo_distill > 0} ({self._lambda_photo_distill}), "
+            f"sketch={self._lambda_sketch_distill > 0} ({self._lambda_sketch_distill}), "
+            f"text={self._lambda_text_distill > 0} ({self._lambda_text_distill})"
+        )
         self._train_teacher_ln = getattr(cfg, "train_teacher_ln", False)
         if self._train_teacher_ln:
             teacher_visual = getattr(self.model_distill, "visual", self.model_distill)
@@ -304,16 +349,28 @@ class CustomCLIP(nn.Module):
         )
         _, neg_feature, neg_raw_feature = self.get_logits(neg_tensor, classnames)
         
-        if self._distill_photo_only:
-            train_sketch_distill = getattr(self.cfg, "lambda_sketch_distill", 0.0) > 0
-            teacher_input = self.teacher_image_input(photo_aug_tensor)
+        train_photo_distill = self._lambda_photo_distill > 0
+        train_sketch_distill = self._lambda_sketch_distill > 0
+        photo_aug_features = photo_feature.detach()
+        sk_aug_features = sk_feature.detach()
+
+        if self._image_distill_active and not self._train_teacher_ln:
             with torch.no_grad():
-                photo_aug_features = self.model_distill.encode_image(teacher_input)
-                if train_sketch_distill:
-                    sketch_teacher_input = self.teacher_image_input(sk_aug_tensor)
-                    sk_aug_features = self.model_distill.encode_image(sketch_teacher_input)
-                else:
-                    sk_aug_features = photo_aug_features
+                if train_photo_distill and train_sketch_distill:
+                    if self._use_strong_teacher:
+                        aug_cat = self.teacher_image_input(torch.cat([photo_aug_tensor, sk_aug_tensor], dim=0))
+                    else:
+                        aug_cat = torch.cat([photo_aug_tensor, sk_aug_tensor], dim=0)
+                    aug_feats = self.model_distill.encode_image(aug_cat)
+                    B = photo_aug_tensor.shape[0]
+                    photo_aug_features = aug_feats[:B]
+                    sk_aug_features = aug_feats[B:]
+                elif train_photo_distill:
+                    teacher_input = self.teacher_image_input(photo_aug_tensor)
+                    photo_aug_features = self.model_distill.encode_image(teacher_input)
+                elif train_sketch_distill:
+                    teacher_input = self.teacher_image_input(sk_aug_tensor)
+                    sk_aug_features = self.model_distill.encode_image(teacher_input)
         elif self._train_teacher_ln:
             # Keep photo teacher target fixed, but let sketch target update
             # visual LayerNorm params for sketch-domain adaptation.
@@ -327,20 +384,6 @@ class CustomCLIP(nn.Module):
             with torch.no_grad():
                 photo_aug_features = self.model_distill.encode_image(photo_teacher_input)
             sk_aug_features = self.model_distill.encode_image(sketch_teacher_input)
-        else:
-            # Gộp photo_aug + sketch_aug thành 1 batch → 1 teacher forward pass thay vì 2
-            # Tiết kiệm ~50% thời gian teacher inference (ViT-H/14 rất chậm nếu gọi 2 lần)
-            with torch.no_grad():
-                if self._use_strong_teacher:
-                    aug_cat = self.teacher_image_input(torch.cat([photo_aug_tensor, sk_aug_tensor], dim=0))
-                    aug_feats = self.model_distill.encode_image(aug_cat)          # (2B, 1024)
-                else:
-                    aug_cat = torch.cat([photo_aug_tensor, sk_aug_tensor], dim=0)
-                    aug_feats = self.model_distill.encode_image(aug_cat)          # (2B, 512)
-            
-            B = photo_aug_tensor.shape[0]
-            photo_aug_features = aug_feats[:B]   # (B, D)
-            sk_aug_features    = aug_feats[B:]   # (B, D)
             
         photo_distill_feature = self.project_distill_feature(photo_feature)
         sk_distill_feature = self.project_distill_feature(sk_feature)

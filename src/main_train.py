@@ -12,6 +12,52 @@ from src.sketchy_dataset import TrainDataset, ValidDataset
 from src.model import ZS_SBIR
 from src.utils import get_all_categories
 
+
+def normalize_distill_args(args):
+    """
+    Convert old distill flags to explicit branch weights.
+
+    New style:
+        --lambda_photo_distill P --lambda_sketch_distill S --lambda_text_distill T
+
+    Legacy style is still supported:
+        --lambda_distill P --distill_photo_only --lambda_sketch_distill r
+        means photo=P and sketch=P*r.
+    """
+    new_style = args.lambda_photo_distill is not None
+
+    if new_style:
+        photo_weight = args.lambda_photo_distill
+        sketch_weight = 0.0 if args.lambda_sketch_distill is None else args.lambda_sketch_distill
+        text_weight = 0.0 if args.lambda_text_distill is None else args.lambda_text_distill
+    else:
+        photo_weight = args.lambda_distill
+        if args.distill_photo_only:
+            sketch_ratio = 0.0 if args.lambda_sketch_distill is None else args.lambda_sketch_distill
+            sketch_weight = args.lambda_distill * sketch_ratio
+        else:
+            sketch_weight = args.lambda_distill
+
+        if args.distill_text:
+            text_weight = 1.0 if args.lambda_text_distill is None else args.lambda_text_distill
+        else:
+            text_weight = 0.0
+
+    args.lambda_photo_distill = float(photo_weight)
+    args.lambda_sketch_distill = float(sketch_weight)
+    args.lambda_text_distill = float(text_weight)
+    args.image_distill_active = args.lambda_photo_distill > 0 or args.lambda_sketch_distill > 0
+    args.text_distill_active = args.lambda_text_distill > 0
+    args.any_distill_active = args.image_distill_active or args.text_distill_active
+
+    print(
+        "[Distill] branch weights -> "
+        f"photo={args.lambda_photo_distill}, "
+        f"sketch={args.lambda_sketch_distill}, "
+        f"text={args.lambda_text_distill}"
+    )
+
+
 def get_datasets(args):
     seed = 42
     random.seed(seed)
@@ -106,19 +152,20 @@ if __name__ == "__main__":
                         help='Chạy strong teacher dfn5b/laion_h ở FP16 để giảm VRAM và tăng tốc.')
     parser.add_argument('--lambda_distill', type=float, default=1.0,
                         help=(
-                            "Trọng số cho distillation loss:\n"
-                            "  clip32: 1.0 (mặc định, scale tương đương cls/nt_xent)\n"
-                            "  dfn5b:  khuyến nghị 10.0–50.0 (RKD scale nhỏ hơn ~10–50x)"
+                            "Legacy: trọng số image distillation chính. "
+                            "Nếu dùng --lambda_photo_distill thì bỏ qua flag này."
                         ))
+    parser.add_argument('--lambda_photo_distill', type=float, default=None,
+                        help='Trọng số trực tiếp cho photo distillation loss.')
     parser.add_argument('--use_distill_proj', action='store_true', default=False,
                         help='Thêm linear projection student sang teacher dim rồi distill bằng cross_loss InfoNCE.')
     parser.add_argument('--distill_photo_only', action='store_true', default=False,
-                        help='Chỉ distill nhánh photo từ teacher; sketch học qua CE/triplet/NT-Xent.')
-    parser.add_argument('--lambda_sketch_distill', type=float, default=0.0,
-                        help='Trọng số sketch distill phụ khi dùng distill_photo_only.')
+                        help='Legacy: sketch weight = lambda_distill * lambda_sketch_distill.')
+    parser.add_argument('--lambda_sketch_distill', type=float, default=None,
+                        help='Trọng số trực tiếp cho sketch distillation loss.')
     parser.add_argument('--distill_text', action='store_true', default=False,
-                        help='Distill text features từ teacher text encoder sang student text prompts.')
-    parser.add_argument('--lambda_text_distill', type=float, default=1.0,
+                        help='Legacy: bật text distillation nếu chưa dùng lambda_text_distill trực tiếp.')
+    parser.add_argument('--lambda_text_distill', type=float, default=None,
                         help='Trọng số riêng cho text distillation loss.')
     parser.add_argument('--distill_semantic_proto', action='store_true', default=False,
                         help='Dùng teacher text features làm semantic prototypes để distill photo/sketch.')
@@ -143,6 +190,7 @@ if __name__ == "__main__":
 
     
     args = parser.parse_args()
+    normalize_distill_args(args)
     logger = TensorBoardLogger('tb_logs', name=args.exp_name)
     
     checkpoint_callback = ModelCheckpoint(
