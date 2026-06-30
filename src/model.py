@@ -511,7 +511,9 @@ class ZS_SBIR(pl.LightningModule):
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
             show_on_bar = k.startswith('rkd')
-            self.log(f'{k}', v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
+            # Rút gọn tên để không bị vỡ giao diện
+            bar_name = k.replace("rkd_sk_ph", "R_SP").replace("rkd_ph_txt", "R_PT").replace("rkd_sk_txt", "R_ST")
+            self.log(bar_name, v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
         return loss
     
     def validation_step(self, batch, batch_idx, dataloader_idx):

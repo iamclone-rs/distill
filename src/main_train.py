@@ -196,13 +196,16 @@ if __name__ == "__main__":
         print ('resuming training from %s'%ckpt_path)
 
     train_loader, val_sketch_loader, val_photo_loader = get_datasets(args)
+    from pytorch_lightning.callbacks import TQDMProgressBar
+    progress_bar = TQDMProgressBar(refresh_rate=20)
+
     trainer = Trainer(accelerator='gpu', devices=1, 
         min_epochs=1, max_epochs=args.epochs,
         benchmark=True,
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=args.progress,
-        callbacks=[checkpoint_callback]
+        callbacks=[checkpoint_callback, progress_bar]
     )
 
     classnames = get_all_categories(args)
