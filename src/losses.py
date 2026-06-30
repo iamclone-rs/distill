@@ -104,6 +104,7 @@ def loss_fn(args, model, features, mode='train'):
     loss_ce_photo = F.cross_entropy(pos_logits, label)
     loss_ce_sk = F.cross_entropy(sk_logits, label)
     loss_cls = loss_ce_photo + loss_ce_sk
+    loss_dict = {}
 
     if getattr(args, "use_rkd", False):
         temp = getattr(args, "rkd_temperature", 0.07)
@@ -115,6 +116,7 @@ def loss_fn(args, model, features, mode='train'):
         if lambda_rkd_sk_ph > 0:
             rkd_sk_ph = rkd_loss(sk_distill_features, photo_distill_features, sk_aug_features, photo_aug_features, temp)
             loss_image_distill = loss_image_distill + lambda_rkd_sk_ph * rkd_sk_ph
+            loss_dict['rkd_sk_ph'] = rkd_sk_ph
 
         # 2. RKD Photo-Text và Sketch-Text (Hỗ trợ Zero-Shot)
         lambda_rkd_ph_txt = getattr(args, "lambda_rkd_ph_txt", 0.0)
@@ -124,10 +126,12 @@ def loss_fn(args, model, features, mode='train'):
             if lambda_rkd_ph_txt > 0 and photo_text_distill_features is not None:
                 rkd_ph_txt = rkd_loss(photo_distill_features, photo_text_distill_features, photo_aug_features, teacher_text_features, temp)
                 loss_text_distill = loss_text_distill + lambda_rkd_ph_txt * rkd_ph_txt
+                loss_dict['rkd_ph_txt'] = rkd_ph_txt
                 
             if lambda_rkd_sk_txt > 0 and sk_text_distill_features is not None:
                 rkd_sk_txt = rkd_loss(sk_distill_features, sk_text_distill_features, sk_aug_features, teacher_text_features, temp)
                 loss_text_distill = loss_text_distill + lambda_rkd_sk_txt * rkd_sk_txt
+                loss_dict['rkd_sk_txt'] = rkd_sk_txt
     else:
         lambda_photo_distill = getattr(args, "lambda_photo_distill", 0.0)
         lambda_sketch_distill = getattr(args, "lambda_sketch_distill", 0.0)
@@ -137,10 +141,12 @@ def loss_fn(args, model, features, mode='train'):
         if lambda_photo_distill > 0:
             loss_distill_photo = cross_loss(photo_distill_features, photo_aug_features, args)
             loss_image_distill = loss_image_distill + lambda_photo_distill * loss_distill_photo
+            loss_dict['distill_photo'] = loss_distill_photo
     
         if lambda_sketch_distill > 0:
             loss_distill_sk = cross_loss(sk_distill_features, sk_aug_features, args)
             loss_image_distill = loss_image_distill + lambda_sketch_distill * loss_distill_sk
+            loss_dict['distill_sk'] = loss_distill_sk
     
         loss_text_distill = torch.tensor(0.0, device=pos_logits.device)
         if (
@@ -173,4 +179,8 @@ def loss_fn(args, model, features, mode='train'):
         + lambda_nt_xent * nt_xent_loss
     )
     
-    return total_loss
+    loss_dict['cls'] = loss_cls
+    loss_dict['triplet'] = loss_triplet
+    loss_dict['nt_xent'] = nt_xent_loss
+    
+    return total_loss, loss_dict
