@@ -14,6 +14,7 @@ except ImportError:
     OPEN_CLIP_AVAILABLE = False
 
 from src.coprompt import MultiModalPromptLearner, Adapter, TextEncoder
+from src.dfn_coprompt_teacher import DFNCoPromptTeacher
 from src.utils import load_clip_to_cpu, get_all_categories, retrieval_precision, visualize_tsne
 from src.losses import loss_fn
 from src.data_config import VISUALIZE_CLASSES, UNSEEN_CLASSES
@@ -112,6 +113,13 @@ def _load_teacher_checkpoint(teacher, ckpt_path):
     )
 
 
+def _freeze_teacher(teacher):
+    teacher.eval()
+    for p in teacher.parameters():
+        p.requires_grad = False
+    return teacher
+
+
 def _load_teacher(args):
     """
     Trả về strong_teacher model (frozen) hoặc None.
@@ -146,11 +154,24 @@ def _load_teacher(args):
     model_name, pretrained = _TEACHER_REGISTRY[teacher_key]
     print(f"[Teacher] Đang load {teacher_key} ({model_name}, pretrained={pretrained})...")
     teacher, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
-    _load_teacher_checkpoint(teacher, getattr(args, "teacher_ckpt", ""))
     teacher.text_tokenizer = open_clip.get_tokenizer(model_name)
-    teacher.eval()
-    for p in teacher.parameters():
-        p.requires_grad = False
+    ckpt_path = getattr(args, "teacher_ckpt", "")
+    if ckpt_path:
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        if isinstance(checkpoint, dict) and "teacher_coprompt_state_dict" in checkpoint:
+            print(f"[Teacher] Loading DFN-CoPrompt teacher checkpoint: {ckpt_path}")
+            teacher = DFNCoPromptTeacher(args, teacher, teacher.text_tokenizer)
+            missing, unexpected = teacher.load_state_dict(
+                checkpoint["teacher_coprompt_state_dict"],
+                strict=False,
+            )
+            print(
+                "[Teacher] DFN-CoPrompt checkpoint loaded -> "
+                f"missing={len(missing)}, unexpected={len(unexpected)}"
+            )
+        else:
+            _load_teacher_checkpoint(teacher, ckpt_path)
+    teacher = _freeze_teacher(teacher)
     teacher = teacher.to(device)
     if getattr(args, "quantize_fp16", False):
         if device.type != "cuda":
@@ -311,6 +332,12 @@ class CustomCLIP(nn.Module):
         if cache_key in self._teacher_text_cache:
             return self._teacher_text_cache[cache_key]
 
+        if hasattr(self.model_distill, "get_text_features"):
+            with torch.no_grad():
+                text_features = self.model_distill.get_text_features(classnames)
+            self._teacher_text_cache[cache_key] = text_features
+            return text_features
+
         tokenizer = getattr(self.model_distill, "text_tokenizer", None)
         if tokenizer is None:
             return None
@@ -398,10 +425,16 @@ class CustomCLIP(nn.Module):
             with torch.no_grad():
                 if train_photo_distill:
                     teacher_input = self.teacher_image_input(photo_aug_tensor)
-                    photo_aug_features = self.model_distill.encode_image(teacher_input)
+                    if hasattr(self.model_distill, "encode_photo"):
+                        photo_aug_features = self.model_distill.encode_photo(teacher_input, classnames)
+                    else:
+                        photo_aug_features = self.model_distill.encode_image(teacher_input)
                 if train_sketch_distill:
                     teacher_input = self.teacher_image_input(sk_aug_tensor)
-                    sk_aug_features = self.model_distill.encode_image(teacher_input)
+                    if hasattr(self.model_distill, "encode_sketch"):
+                        sk_aug_features = self.model_distill.encode_sketch(teacher_input, classnames)
+                    else:
+                        sk_aug_features = self.model_distill.encode_image(teacher_input)
         photo_distill_feature = self.project_distill_feature(photo_feature)
         sk_distill_feature = self.project_distill_feature(sk_feature)
         neg_distill_feature = self.project_distill_feature(neg_raw_feature)

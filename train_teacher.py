@@ -1,7 +1,7 @@
 """
 train_teacher.py
 ================
-Stage 1: Fine-tune DFN5B (last N visual blocks) tren SBIR task.
+Stage 1: Fine-tune DFN5B-CoPrompt teacher tren SBIR task.
     - Loss = CE(cls) + Triplet + NT-Xent  (y het student)
     - In baseline metrics truoc khi train
     - Sau moi epoch validate va in mAP / Precision@K
@@ -12,7 +12,6 @@ Vi du chay (Google Colab):
         --root /content/sketchy/Sketchy \\
         --dataset sketchy_2 \\
         --epochs 5 \\
-        --n_blocks 4 \\
         --batch_size 32 \\
         --lr 2e-5 \\
         --workers 8
@@ -34,142 +33,39 @@ from torchmetrics.functional import retrieval_average_precision
 from src.sketchy_dataset import TrainDataset, ValidDataset
 from src.utils import get_all_categories, retrieval_precision
 from src.losses import nt_xent
+from src.dfn_coprompt_teacher import DFNCoPromptTeacher
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-# ─── Freeze helpers ───────────────────────────────────────────────────────────
-
-def _freeze_all(model: nn.Module):
-    for p in model.parameters():
-        p.requires_grad_(False)
-
-
-def _unfreeze_layernorms(model: nn.Module):
-    for m in model.modules():
-        if isinstance(m, nn.LayerNorm):
-            for p in m.parameters(recurse=False):
-                p.requires_grad_(True)
+def seed_everything(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
 
-def unfreeze_last_n_blocks(model: nn.Module, n: int = 4) -> int:
-    """
-    Freeze toan bo DFN5B, sau do mo:
-      - Tat ca LayerNorm (moi noi trong model)
-      - n transformer blocks cuoi cung cua visual encoder
-      - ln_post va proj cua visual encoder (neu co)
-      - logit_scale
-    """
-    _freeze_all(model)
-    _unfreeze_layernorms(model)
-
-    blocks = model.visual.transformer.resblocks
-    total  = len(blocks)
-    for i, block in enumerate(blocks):
-        if i >= total - n:
-            for p in block.parameters():
-                p.requires_grad_(True)
-
-    for attr in ("ln_post", "proj"):
-        obj = getattr(model.visual, attr, None)
-        if obj is None:
-            continue
-        if isinstance(obj, nn.Module):
-            for p in obj.parameters():
-                p.requires_grad_(True)
-        elif isinstance(obj, torch.Tensor):
-            obj.requires_grad_(True)
-
-    if hasattr(model, "logit_scale"):
-        model.logit_scale.requires_grad_(True)
-
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(
-        f"[Teacher] Unfreeze last {n}/{total} blocks + all LayerNorm + proj"
-        f" -> {trainable / 1e6:.1f}M trainable params"
-    )
-    return trainable
-
-
-# ─── Wrapper model ────────────────────────────────────────────────────────────
-
-class TeacherWrapper(nn.Module):
-    """
-    Boc DFN5B voi:
-      - adapter rieng cho photo branch va sketch branch (residual, alpha=0.1)
-      - cache text features theo classnames
-    """
-
-    DIM = 1024  # DFN5B output dim
-
-    def __init__(self, dfn_model: nn.Module, tokenizer):
-        super().__init__()
-        self.model     = dfn_model
-        self.tokenizer = tokenizer
-        self._text_cache: dict = {}
-
-        def _make_adapter():
-            return nn.Sequential(
-                nn.Linear(self.DIM, self.DIM // 4, bias=False),
-                nn.ReLU(inplace=True),
-                nn.Linear(self.DIM // 4, self.DIM, bias=False),
-            ).float().to(device)
-
-        self.adapter_photo  = _make_adapter()
-        self.adapter_sketch = _make_adapter()
-        self.alpha = 0.1
-
-    def _base_encode(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model.encode_image(x).float()
-
-    def encode_photo(self, x: torch.Tensor) -> torch.Tensor:
-        feat = self._base_encode(x)
-        return self.alpha * self.adapter_photo(feat) + (1 - self.alpha) * feat
-
-    def encode_sketch(self, x: torch.Tensor) -> torch.Tensor:
-        feat = self._base_encode(x)
-        return self.alpha * self.adapter_sketch(feat) + (1 - self.alpha) * feat
-
-    @torch.no_grad()
-    def get_text_features(self, classnames: list) -> torch.Tensor:
-        key = tuple(classnames)
-        if key not in self._text_cache:
-            prompts = [
-                "a photo/sketch of " + n.replace("_", " ") + "."
-                for n in classnames
-            ]
-            tokens = self.tokenizer(prompts).to(device)
-            tf = self.model.encode_text(tokens).float()
-            tf = F.normalize(tf, dim=-1)
-            self._text_cache[key] = tf
-        return self._text_cache[key]
-
-    def get_logit_scale(self) -> torch.Tensor:
-        return self.model.logit_scale.exp()
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 # ─── Loss ─────────────────────────────────────────────────────────────────────
 
-def compute_loss(wrapper: TeacherWrapper, batch: tuple, classnames: list, args) -> tuple:
+def compute_loss(wrapper: DFNCoPromptTeacher, batch: tuple, classnames: list, args) -> tuple:
     photo, sketch, _ph_aug, _sk_aug, neg, label = batch
     photo  = photo.to(device)
     sketch = sketch.to(device)
     neg    = neg.to(device)
     label  = label.to(device)
 
-    ph_feat = wrapper.encode_photo(photo)
-    sk_feat = wrapper.encode_sketch(sketch)
-    ng_feat = wrapper.encode_photo(neg)
+    ph_logits, ph_norm, ph_feat = wrapper.get_logits(photo, classnames, modality="photo")
+    sk_logits, sk_norm, sk_feat = wrapper.get_logits(sketch, classnames, modality="sketch")
+    _, ng_norm, _ng_feat = wrapper.get_logits(neg, classnames, modality="photo")
 
-    ph_norm = F.normalize(ph_feat, dim=-1)
-    sk_norm = F.normalize(sk_feat, dim=-1)
-    ng_norm = F.normalize(ng_feat, dim=-1)
-
-    # Classification loss
-    text_feat = wrapper.get_text_features(classnames)
-    ls        = wrapper.get_logit_scale()
-    ph_logits = ls * ph_norm @ text_feat.T
-    sk_logits = ls * sk_norm @ text_feat.T
     loss_cls  = (
         F.cross_entropy(ph_logits, label)
         + F.cross_entropy(sk_logits, label)
@@ -194,7 +90,7 @@ def compute_loss(wrapper: TeacherWrapper, batch: tuple, classnames: list, args) 
 # ─── Validation ───────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def validate(wrapper: TeacherWrapper, sk_loader: DataLoader, ph_loader: DataLoader, args) -> float:
+def validate(wrapper: DFNCoPromptTeacher, sk_loader: DataLoader, ph_loader: DataLoader, classnames: list, args) -> float:
     wrapper.eval()
     use_amp = device.type == "cuda"
 
@@ -204,14 +100,14 @@ def validate(wrapper: TeacherWrapper, sk_loader: DataLoader, ph_loader: DataLoad
     # ── Extract features (FP16 autocast for 2-3x speedup on GPU) ──────────────
     for images, labels in tqdm(sk_loader, desc="  Extract sketch", leave=False):
         with torch.amp.autocast(device_type="cuda", enabled=use_amp):
-            feat = wrapper.encode_sketch(images.to(device))
+            feat = wrapper.encode_sketch(images.to(device), classnames)
         feat = F.normalize(feat.float(), dim=-1)
         sk_feats.append(feat.cpu())
         sk_labels.append(labels)
 
     for images, labels in tqdm(ph_loader, desc="  Extract photo ", leave=False):
         with torch.amp.autocast(device_type="cuda", enabled=use_amp):
-            feat = wrapper.encode_photo(images.to(device))
+            feat = wrapper.encode_photo(images.to(device), classnames)
         feat = F.normalize(feat.float(), dim=-1)
         ph_feats.append(feat.cpu())
         ph_labels.append(labels)
@@ -260,6 +156,8 @@ def main():
     parser.add_argument("--dataset",         type=str,   default="sketchy_2")
     parser.add_argument("--use_classes",     type=int,   default=104)
     parser.add_argument("--max_size",        type=int,   default=224)
+    parser.add_argument("--n_ctx",           type=int,   default=1)
+    parser.add_argument("--prompt_depth",    type=int,   default=12)
     parser.add_argument("--proportion",      type=float, default=1.0)
     parser.add_argument("--data_split",      type=int,   default=-1)
     parser.add_argument("--gzs",             action="store_true", default=False)
@@ -272,9 +170,8 @@ def main():
     parser.add_argument("--test_batch_size", type=int,   default=512)
     parser.add_argument("--lr",              type=float, default=2e-5)
     parser.add_argument("--workers",         type=int,   default=4)
-    parser.add_argument("--n_blocks",        type=int,   default=4,
-                        help="So blocks cuoi DFN5B se unfreeze (mac dinh=4)")
     parser.add_argument("--log_every",       type=int,   default=50)
+    parser.add_argument("--seed",            type=int,   default=42)
 
     # Loss
     parser.add_argument("--lambda_cls",      type=float, default=1.0)
@@ -286,13 +183,12 @@ def main():
 
     args = parser.parse_args()
 
-    random.seed(42); np.random.seed(42); torch.manual_seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(42)
+    seed_everything(args.seed)
 
     print("=" * 60)
     print(f"  dataset={args.dataset}  epochs={args.epochs}  "
-          f"n_blocks={args.n_blocks}  lr={args.lr}  bs={args.batch_size}")
+          f"n_ctx={args.n_ctx}  prompt_depth={args.prompt_depth}  "
+          f"lr={args.lr}  bs={args.batch_size}  seed={args.seed}")
     print(f"  loss -> cls={args.lambda_cls}  "
           f"triplet={args.lambda_triplet}  nt_xent={args.lambda_nt_xent}")
     print("=" * 60)
@@ -305,19 +201,25 @@ def main():
     tokenizer = open_clip.get_tokenizer("ViT-H-14-quickgelu")
     dfn_model = dfn_model.to(device)
 
-    unfreeze_last_n_blocks(dfn_model, n=args.n_blocks)
-    wrapper = TeacherWrapper(dfn_model, tokenizer).to(device)
+    wrapper = DFNCoPromptTeacher(args, dfn_model, tokenizer).to(device)
+    trainable = sum(p.numel() for p in wrapper.parameters() if p.requires_grad)
+    print(f"[Teacher] DFN-CoPrompt trainable params: {trainable / 1e6:.2f}M")
 
     # Datasets
     train_ds   = TrainDataset(args, args.proportion)
     val_sketch = ValidDataset(args, mode="sketch")
     val_photo  = ValidDataset(args)
 
+    generator = torch.Generator()
+    generator.manual_seed(args.seed)
+
     lkw = dict(
         num_workers=args.workers,
         pin_memory=True,
         persistent_workers=args.workers > 0,
         prefetch_factor=4 if args.workers > 0 else None,
+        worker_init_fn=seed_worker,
+        generator=generator,
     )
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, **lkw
@@ -344,7 +246,7 @@ def main():
 
     # Baseline truoc khi train
     print("[Baseline] DFN5B zero-shot (chua fine-tune):")
-    validate(wrapper, sk_loader, ph_loader, args)
+    validate(wrapper, sk_loader, ph_loader, classnames, args)
     print()
 
     # Training loop
@@ -371,7 +273,7 @@ def main():
 
         avg = epoch_loss / len(train_loader)
         print(f"\n[Epoch {epoch}] avg_loss={avg:.4f}")
-        mAP = validate(wrapper, sk_loader, ph_loader, args)
+        mAP = validate(wrapper, sk_loader, ph_loader, classnames, args)
 
         if mAP > best_map:
             best_map = mAP
@@ -380,9 +282,8 @@ def main():
                     "epoch":   epoch,
                     "mAP":     mAP,
                     "args":    vars(args),
-                    "dfn5b_state_dict":          dfn_model.state_dict(),
-                    "adapter_photo_state_dict":  wrapper.adapter_photo.state_dict(),
-                    "adapter_sketch_state_dict": wrapper.adapter_sketch.state_dict(),
+                    "teacher_type": "dfn_coprompt",
+                    "teacher_coprompt_state_dict": wrapper.state_dict(),
                 },
                 args.save_path,
             )
