@@ -33,6 +33,13 @@ _TEACHER_REGISTRY = {
 def _needs_strong_teacher(args):
     if getattr(args, "teacher", "clip32") == "clip32":
         return False
+    if getattr(args, "use_rkd", False):
+        return (
+            getattr(args, "lambda_rkd_sk_ph", 0.0) > 0
+            or getattr(args, "lambda_rkd_ph_txt", 0.0) > 0
+            or getattr(args, "lambda_rkd_sk_txt", 0.0) > 0
+        )
+
     return (
         getattr(args, "lambda_photo_distill", 0.0) > 0
         or getattr(args, "lambda_sketch_distill", 0.0) > 0
