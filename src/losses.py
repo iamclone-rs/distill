@@ -110,6 +110,7 @@ def loss_fn(args, model, features, mode='train'):
         temp = getattr(args, "rkd_temperature", 0.07)
         loss_image_distill = torch.tensor(0.0, device=pos_logits.device)
         loss_text_distill = torch.tensor(0.0, device=pos_logits.device)
+        lambda_text_distill = 1.0  # RKD đã nhân hệ số lambda_rkd_* vào bên trong loss_text_distill, nên ở bước cộng tổng cuối cùng chỉ nhân với 1.0
 
         # 1. RKD Sketch-Photo (Thay thế InfoNCE Photo/Sketch Distill cũ)
         lambda_rkd_sk_ph = getattr(args, "lambda_rkd_sk_ph", 0.0)
