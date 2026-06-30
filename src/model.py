@@ -1,4 +1,3 @@
-import os
 import copy
 import numpy as np
 import torch
@@ -38,7 +37,6 @@ def _needs_strong_teacher(args):
         getattr(args, "lambda_photo_distill", 0.0) > 0
         or getattr(args, "lambda_sketch_distill", 0.0) > 0
         or getattr(args, "lambda_text_distill", 0.0) > 0
-        or getattr(args, "train_teacher_ln", False)
     )
 
 
@@ -51,10 +49,6 @@ def _load_teacher(args):
         'dfn5b'   → DFN5B-CLIP-H/14 (1024-dim, frozen, via open_clip)
         'laion_h' → LAION CLIP-H/14 (1024-dim, frozen, via open_clip)
 
-    args.teacher_ckpt (tuỳ chọn):
-        Path đến file .pt từ train_teacher.py (Stage 1 fine-tuned).
-        Nếu có, load dfn5b_state_dict từ checkpoint vào model thay vì dùng
-        pretrained weights gốc.
     """
     teacher_key = getattr(args, "teacher", "clip32")
 
@@ -79,26 +73,8 @@ def _load_teacher(args):
         )
 
     model_name, pretrained = _TEACHER_REGISTRY[teacher_key]
-
-    teacher_ckpt = getattr(args, "teacher_ckpt", None)
-    if teacher_ckpt and os.path.exists(teacher_ckpt):
-        # Load architecture rỗng (pretrained=None để không download weights gốc)
-        print(f"[Teacher] Đang load architecture {teacher_key} ({model_name})...")
-        teacher, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=None)
-        print(f"[Teacher] Load fine-tuned weights từ: {teacher_ckpt}")
-        ckpt = torch.load(teacher_ckpt, map_location="cpu")
-        missing, unexpected = teacher.load_state_dict(ckpt["dfn5b_state_dict"], strict=True)
-        if missing:
-            print(f"[Teacher] Missing keys: {missing[:5]}")
-        if unexpected:
-            print(f"[Teacher] Unexpected keys: {unexpected[:5]}")
-        print(f"[Teacher] Fine-tuned checkpoint loaded (Stage 1 mAP={ckpt.get('mAP', 'N/A'):.4f})")
-    else:
-        if teacher_ckpt:
-            print(f"[Teacher] WARNING: --teacher_ckpt '{teacher_ckpt}' không tồn tại, dùng pretrained gốc.")
-        print(f"[Teacher] Đang load {teacher_key} ({model_name}, pretrained={pretrained})...")
-        teacher, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
-
+    print(f"[Teacher] Đang load {teacher_key} ({model_name}, pretrained={pretrained})...")
+    teacher, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
     teacher.text_tokenizer = open_clip.get_tokenizer(model_name)
     teacher.eval()
     for p in teacher.parameters():
@@ -152,10 +128,7 @@ class CustomCLIP(nn.Module):
     ):
         super().__init__()
         self.cfg = cfg
-        if not getattr(cfg, "train_full_student", False):
-            clip_model.apply(freeze_all_but_ln)
-        else:
-            print("[Student] train_full_student=True -> visual student encoders are fully trainable")
+        clip_model.apply(freeze_all_but_ln)
         clip_model_distill.apply(freeze_all_but_ln)
         self.dtype = clip_model.dtype
         self.prompt_learner_photo = MultiModalPromptLearner(cfg, clip_model_distill, type='photo')
@@ -163,13 +136,6 @@ class CustomCLIP(nn.Module):
         
         self.ph_encoder = copy.deepcopy(clip_model.visual)
         self.sk_encoder = copy.deepcopy(clip_model.visual)
-        if getattr(cfg, "train_attn_out_proj", False):
-            num_ph_params = unfreeze_attention_out_proj(self.ph_encoder)
-            num_sk_params = unfreeze_attention_out_proj(self.sk_encoder)
-            print(
-                "[Student] train_attn_out_proj=True -> "
-                f"unfreeze {num_ph_params + num_sk_params} attention out_proj params"
-            )
         self.text_encoder = TextEncoder(clip_model_distill, cfg)
         self.logit_scale = clip_model.logit_scale
         
@@ -192,16 +158,19 @@ class CustomCLIP(nn.Module):
         )
         self._distill_text = self._lambda_text_distill > 0
         self._distill_proj_requested = getattr(cfg, "use_distill_proj", False)
-        self._infer_with_distill_proj = getattr(cfg, "infer_with_distill_proj", False)
         self._teacher_fp16 = (
             self._use_strong_teacher
             and getattr(cfg, "quantize_fp16", False)
             and device.type == "cuda"
         )
         self._distill_proj_dim = 1024 if self._use_strong_teacher else 512
+        if self._use_strong_teacher and self._image_distill_active and not self._distill_proj_requested:
+            raise ValueError(
+                "Strong teacher output 1024-dim, student output 512-dim. "
+                "Hãy bật --use_distill_proj khi lambda_photo_distill/lambda_sketch_distill > 0."
+            )
         self._use_distill_proj = self._distill_proj_requested and (
             self._image_distill_active
-            or self._infer_with_distill_proj
         )
         if self._use_distill_proj:
             self.distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
@@ -225,14 +194,6 @@ class CustomCLIP(nn.Module):
             f"sketch={self._lambda_sketch_distill > 0} ({self._lambda_sketch_distill}), "
             f"text={self._lambda_text_distill > 0} ({self._lambda_text_distill})"
         )
-        self._train_teacher_ln = getattr(cfg, "train_teacher_ln", False)
-        if self._train_teacher_ln:
-            teacher_visual = getattr(self.model_distill, "visual", self.model_distill)
-            num_ln_params = unfreeze_layernorm_params(teacher_visual)
-            print(
-                "[Teacher] train_teacher_ln=True -> "
-                f"unfreeze {num_ln_params} visual LayerNorm params for sketch teacher adaptation"
-            )
         self.image_adapter_m = 0.1
         self.text_adapter_m = 0.1
         self.saved_features = defaultdict(lambda: {"sketch": [], "photo": []})
@@ -361,7 +322,7 @@ class CustomCLIP(nn.Module):
         photo_aug_features = photo_feature.detach()
         sk_aug_features = sk_feature.detach()
 
-        if self._image_distill_active and not self._train_teacher_ln:
+        if self._image_distill_active:
             with torch.no_grad():
                 if train_photo_distill:
                     teacher_input = self.teacher_image_input(photo_aug_tensor)
@@ -369,20 +330,6 @@ class CustomCLIP(nn.Module):
                 if train_sketch_distill:
                     teacher_input = self.teacher_image_input(sk_aug_tensor)
                     sk_aug_features = self.model_distill.encode_image(teacher_input)
-        elif self._train_teacher_ln:
-            # Keep photo teacher target fixed, but let sketch target update
-            # visual LayerNorm params for sketch-domain adaptation.
-            if self._use_strong_teacher:
-                photo_teacher_input = self.teacher_image_input(photo_aug_tensor)
-                sketch_teacher_input = self.teacher_image_input(sk_aug_tensor)
-            else:
-                photo_teacher_input = photo_aug_tensor
-                sketch_teacher_input = sk_aug_tensor
-
-            with torch.no_grad():
-                photo_aug_features = self.model_distill.encode_image(photo_teacher_input)
-            sk_aug_features = self.model_distill.encode_image(sketch_teacher_input)
-            
         photo_distill_feature = self.project_distill_feature(photo_feature)
         sk_distill_feature = self.project_distill_feature(sk_feature)
         neg_distill_feature = self.project_distill_feature(neg_raw_feature)
@@ -397,9 +344,6 @@ class CustomCLIP(nn.Module):
         
     def extract_feature(self, image, classname, type='photo'):
         _, feature, raw_feature = self.get_logits(image, classnames=classname, type=type)
-        if self._infer_with_distill_proj:
-            feature = self.project_distill_feature(raw_feature)
-            feature = feature / feature.norm(dim=-1, keepdim=True)
         return feature
             
 class ZS_SBIR(pl.LightningModule):

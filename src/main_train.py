@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import random
 import argparse
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from pytorch_lightning import Trainer 
 from pytorch_lightning.loggers import TensorBoardLogger 
 from pytorch_lightning.callbacks import ModelCheckpoint 
@@ -13,43 +13,7 @@ from src.model import ZS_SBIR
 from src.utils import get_all_categories
 
 
-def normalize_distill_args(args):
-    """
-    Convert old distill flags to explicit branch weights.
-
-    New style:
-        --lambda_photo_distill P --lambda_sketch_distill S --lambda_text_distill T
-
-    Legacy style is still supported:
-        --lambda_distill P --distill_photo_only --lambda_sketch_distill r
-        means photo=P and sketch=P*r.
-    """
-    new_style = args.lambda_photo_distill is not None
-
-    if new_style:
-        photo_weight = args.lambda_photo_distill
-        sketch_weight = 0.0 if args.lambda_sketch_distill is None else args.lambda_sketch_distill
-        text_weight = 0.0 if args.lambda_text_distill is None else args.lambda_text_distill
-    else:
-        photo_weight = args.lambda_distill
-        if args.distill_photo_only:
-            sketch_ratio = 0.0 if args.lambda_sketch_distill is None else args.lambda_sketch_distill
-            sketch_weight = args.lambda_distill * sketch_ratio
-        else:
-            sketch_weight = args.lambda_distill
-
-        if args.distill_text:
-            text_weight = 1.0 if args.lambda_text_distill is None else args.lambda_text_distill
-        else:
-            text_weight = 0.0
-
-    args.lambda_photo_distill = float(photo_weight)
-    args.lambda_sketch_distill = float(sketch_weight)
-    args.lambda_text_distill = float(text_weight)
-    args.image_distill_active = args.lambda_photo_distill > 0 or args.lambda_sketch_distill > 0
-    args.text_distill_active = args.lambda_text_distill > 0
-    args.any_distill_active = args.image_distill_active or args.text_distill_active
-
+def print_run_config(args):
     print(
         "[Distill] branch weights -> "
         f"photo={args.lambda_photo_distill}, "
@@ -57,15 +21,18 @@ def normalize_distill_args(args):
         f"text={args.lambda_text_distill}"
     )
 
-
-def print_base_loss_weights(args):
     print(
         "[Loss] base weights -> "
         f"cls={args.lambda_cls}, "
         f"triplet={args.lambda_triplet}, "
         f"nt_xent={args.lambda_nt_xent}"
     )
-    print(f"[Seed] seed={args.seed}")
+    print(
+        "[Run] "
+        f"dataset={args.dataset}, teacher={args.teacher}, "
+        f"use_distill_proj={args.use_distill_proj}, "
+        f"quantize_fp16={args.quantize_fp16}, seed={args.seed}"
+    )
 
 
 def seed_everything(seed):
@@ -138,15 +105,10 @@ if __name__ == "__main__":
     parser.add_argument("--use_classes", type=int, default=104)
     parser.add_argument("--data_split", type=int, default=-1)
     parser.add_argument("--prec", type=str, default="fp16")
-    parser.add_argument("--distill", type=str, default="cosine")
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--proportion", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
-    parser.add_argument("--alpha", type=float, default=0.8)
-    parser.add_argument("--gamma", type=float, default=0.1)
-    parser.add_argument("--beta", type=float, default=0.1)
-    parser.add_argument("--lambd", type=float, default=0.1)
     parser.add_argument("--lambda_cls", type=float, default=1.0,
                         help="Trọng số cho classification loss: CE(photo,text)+CE(sketch,text).")
     parser.add_argument("--lambda_triplet", type=float, default=1.0,
@@ -164,10 +126,6 @@ if __name__ == "__main__":
     parser.add_argument('--use_adapt_txt', type=bool, default=True)
     parser.add_argument('--use_co_sk', type=bool, default=True)
     parser.add_argument('--use_co_ph', type=bool, default=True)
-    parser.add_argument('--train_full_student', action='store_true', default=False,
-                        help='Không freeze student CLIP visual encoders; fine-tune toàn bộ student.')
-    parser.add_argument('--train_attn_out_proj', action='store_true', default=False,
-                        help='Mở thêm attention out_proj trong student visual encoders.')
     parser.add_argument('--progress', action='store_true', default=False,
                         help='Hiện tqdm progress bar trong lúc train')
     parser.add_argument('--no_aug', action='store_true', default=False,
@@ -184,45 +142,20 @@ if __name__ == "__main__":
                         ))
     parser.add_argument('--quantize_fp16', action='store_true', default=False,
                         help='Chạy strong teacher dfn5b/laion_h ở FP16 để giảm VRAM và tăng tốc.')
-    parser.add_argument('--lambda_distill', type=float, default=1.0,
-                        help=(
-                            "Legacy: trọng số image distillation chính. "
-                            "Nếu dùng --lambda_photo_distill thì bỏ qua flag này."
-                        ))
-    parser.add_argument('--lambda_photo_distill', type=float, default=None,
+    parser.add_argument('--lambda_photo_distill', type=float, default=0.0,
                         help='Trọng số trực tiếp cho photo distillation loss.')
     parser.add_argument('--use_distill_proj', action='store_true', default=False,
                         help='Thêm linear projection student sang teacher dim rồi distill bằng cross_loss InfoNCE.')
-    parser.add_argument('--distill_photo_only', action='store_true', default=False,
-                        help='Legacy: sketch weight = lambda_distill * lambda_sketch_distill.')
-    parser.add_argument('--lambda_sketch_distill', type=float, default=None,
+    parser.add_argument('--lambda_sketch_distill', type=float, default=0.0,
                         help='Trọng số trực tiếp cho sketch distillation loss.')
-    parser.add_argument('--distill_text', action='store_true', default=False,
-                        help='Legacy: bật text distillation nếu chưa dùng lambda_text_distill trực tiếp.')
-    parser.add_argument('--lambda_text_distill', type=float, default=None,
+    parser.add_argument('--lambda_text_distill', type=float, default=0.0,
                         help='Trọng số riêng cho text distillation loss.')
-    parser.add_argument('--infer_with_distill_proj', action='store_true', default=False,
-                        help='Dùng projected feature cho validation/inference retrieval.')
-    parser.add_argument('--rkd_weight', type=float, default=0.5,
-                        help='Trọng số RKD phụ nếu dùng projected_kd_loss thử nghiệm.')
-    parser.add_argument('--train_teacher_ln', action='store_true', default=False,
-                        help=(
-                            "Train visual LayerNorm của teacher bằng sketch teacher branch. "
-                            "Photo teacher target vẫn chạy no_grad."
-                        ))
-    
-    parser.add_argument('--teacher_ckpt', type=str, default=None,
-                        help=(\
-                            "Path đến file .pt từ train_teacher.py (Stage 1 fine-tuned DFN5B). "
-                            "Nếu có, load weights này vào teacher thay vì dùng pretrained gốc."
-                        ))
     parser.add_argument('--exp_name', type=str, default='Co_prompt')
 
 
     
     args = parser.parse_args()
-    normalize_distill_args(args)
-    print_base_loss_weights(args)
+    print_run_config(args)
     logger = TensorBoardLogger('tb_logs', name=args.exp_name)
     
     checkpoint_callback = ModelCheckpoint(
