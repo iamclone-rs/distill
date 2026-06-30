@@ -274,10 +274,12 @@ class CustomCLIP(nn.Module):
             and device.type == "cuda"
         )
         self._distill_proj_dim = 1024 if self._use_strong_teacher else 512
-        if self._use_strong_teacher and self._image_distill_active and not self._distill_proj_requested:
+        
+        old_distill_active = (self._lambda_photo_distill > 0 or self._lambda_sketch_distill > 0 or self._lambda_text_distill > 0)
+        if self._use_strong_teacher and old_distill_active and not self._distill_proj_requested:
             raise ValueError(
                 "Strong teacher output 1024-dim, student output 512-dim. "
-                "Hãy bật --use_distill_proj khi lambda_photo_distill/lambda_sketch_distill > 0."
+                "Hãy bật --use_distill_proj khi dùng thuật toán InfoNCE cũ."
             )
         self._use_distill_proj = self._distill_proj_requested and (
             self._image_distill_active
