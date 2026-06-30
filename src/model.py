@@ -26,7 +26,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _TEACHER_REGISTRY = {
     # key         : (open_clip model name,    pretrained tag)
     "dfn5b"       : ("ViT-H-14-quickgelu",   "dfn5b"),
-    "laion_h"     : ("ViT-H-14",             "laion2b_s32b_b79k"),
 }
 
 
@@ -40,6 +39,79 @@ def _needs_strong_teacher(args):
     )
 
 
+def _extract_teacher_state_dict(checkpoint):
+    if not isinstance(checkpoint, dict):
+        return checkpoint
+
+    for key in (
+        "dfn5b_state_dict",
+        "teacher_state_dict",
+        "model_state_dict",
+        "state_dict",
+    ):
+        if key in checkpoint:
+            return checkpoint[key]
+
+    if checkpoint and all(torch.is_tensor(v) for v in checkpoint.values()):
+        return checkpoint
+    return checkpoint
+
+
+def _strip_teacher_prefix(key):
+    prefixes = (
+        "module.",
+        "model.model_distill.",
+        "model.teacher.",
+        "model_distill.",
+        "teacher.",
+        "dfn5b.",
+        "model.",
+    )
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+                changed = True
+                break
+    return key
+
+
+def _load_teacher_checkpoint(teacher, ckpt_path):
+    if not ckpt_path:
+        return
+
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    state_dict = _extract_teacher_state_dict(checkpoint)
+    target_state = teacher.state_dict()
+    loadable = {}
+    skipped = 0
+
+    for key, value in state_dict.items():
+        if not torch.is_tensor(value):
+            skipped += 1
+            continue
+        stripped_key = _strip_teacher_prefix(key)
+        if stripped_key in target_state and target_state[stripped_key].shape == value.shape:
+            loadable[stripped_key] = value
+        else:
+            skipped += 1
+
+    if not loadable:
+        raise RuntimeError(
+            f"Không tìm thấy tensor nào khớp để load teacher_ckpt='{ckpt_path}'. "
+            "Kiểm tra checkpoint có đúng backbone teacher không."
+        )
+
+    missing, unexpected = teacher.load_state_dict(loadable, strict=False)
+    print(
+        "[Teacher] loaded checkpoint "
+        f"{ckpt_path} -> loaded={len(loadable)}, skipped={skipped}, "
+        f"missing={len(missing)}, unexpected={len(unexpected)}"
+    )
+
+
 def _load_teacher(args):
     """
     Trả về strong_teacher model (frozen) hoặc None.
@@ -47,7 +119,6 @@ def _load_teacher(args):
     args.teacher:
         'clip32'  → None  (dùng clip_model_distill ViT-B/32, hành vi gốc)
         'dfn5b'   → DFN5B-CLIP-H/14 (1024-dim, frozen, via open_clip)
-        'laion_h' → LAION CLIP-H/14 (1024-dim, frozen, via open_clip)
 
     """
     teacher_key = getattr(args, "teacher", "clip32")
@@ -75,6 +146,7 @@ def _load_teacher(args):
     model_name, pretrained = _TEACHER_REGISTRY[teacher_key]
     print(f"[Teacher] Đang load {teacher_key} ({model_name}, pretrained={pretrained})...")
     teacher, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
+    _load_teacher_checkpoint(teacher, getattr(args, "teacher_ckpt", ""))
     teacher.text_tokenizer = open_clip.get_tokenizer(model_name)
     teacher.eval()
     for p in teacher.parameters():

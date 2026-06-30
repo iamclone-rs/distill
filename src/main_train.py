@@ -31,7 +31,8 @@ def print_run_config(args):
         "[Run] "
         f"dataset={args.dataset}, teacher={args.teacher}, "
         f"use_distill_proj={args.use_distill_proj}, "
-        f"quantize_fp16={args.quantize_fp16}, seed={args.seed}"
+        f"quantize_fp16={args.quantize_fp16}, "
+        f"teacher_ckpt={args.teacher_ckpt or 'default'}, seed={args.seed}"
     )
 
 
@@ -133,15 +134,16 @@ if __name__ == "__main__":
     parser.add_argument('--visualize', action='store_true', default=False)
     parser.add_argument('--gzs', action='store_true', default=False)
     parser.add_argument('--teacher', type=str, default='clip32',
-                        choices=['clip32', 'dfn5b', 'laion_h'],
+                        choices=['clip32', 'dfn5b'],
                         help=(
                             "Teacher model cho distillation:\n"
                             "  clip32 → CLIP ViT-B/32 (mặc định, cross_loss)\n"
-                            "  dfn5b  → DFN5B-CLIP-H/14 1024-dim (cần open-clip-torch)\n"
-                            "  laion_h → LAION CLIP-H/14 1024-dim (cần open-clip-torch)"
+                            "  dfn5b  → DFN5B-CLIP-H/14 1024-dim (cần open-clip-torch)"
                         ))
     parser.add_argument('--quantize_fp16', action='store_true', default=False,
-                        help='Chạy strong teacher dfn5b/laion_h ở FP16 để giảm VRAM và tăng tốc.')
+                        help='Chạy strong teacher dfn5b ở FP16 để giảm VRAM và tăng tốc.')
+    parser.add_argument('--teacher_ckpt', type=str, default='',
+                        help='Đường dẫn checkpoint để load weight cho strong teacher dfn5b.')
     parser.add_argument('--lambda_photo_distill', type=float, default=0.0,
                         help='Trọng số trực tiếp cho photo distillation loss.')
     parser.add_argument('--use_distill_proj', action='store_true', default=False,
