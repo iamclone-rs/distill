@@ -14,12 +14,21 @@ from src.utils import get_all_categories
 
 
 def print_run_config(args):
-    print(
-        "[Distill] branch weights -> "
-        f"photo={args.lambda_photo_distill}, "
-        f"sketch={args.lambda_sketch_distill}, "
-        f"text={args.lambda_text_distill}"
-    )
+    if getattr(args, 'use_rkd', False):
+        print(
+            "[RKD Distill] weights -> "
+            f"sk_ph={getattr(args, 'lambda_rkd_sk_ph', 0.0)}, "
+            f"ph_txt={getattr(args, 'lambda_rkd_ph_txt', 0.0)}, "
+            f"sk_txt={getattr(args, 'lambda_rkd_sk_txt', 0.0)}, "
+            f"temp={getattr(args, 'rkd_temperature', 0.07)}"
+        )
+    else:
+        print(
+            "[Distill] branch weights -> "
+            f"photo={args.lambda_photo_distill}, "
+            f"sketch={args.lambda_sketch_distill}, "
+            f"text={args.lambda_text_distill}"
+        )
 
     print(
         "[Loss] base weights -> "
@@ -152,6 +161,18 @@ if __name__ == "__main__":
                         help='Trọng số trực tiếp cho sketch distillation loss.')
     parser.add_argument('--lambda_text_distill', type=float, default=0.0,
                         help='Trọng số riêng cho text distillation loss.')
+                        
+    parser.add_argument('--use_rkd', action='store_true', default=False,
+                        help='Sử dụng Relational Knowledge Distillation bằng KL-Divergence.')
+    parser.add_argument('--lambda_rkd_sk_ph', type=float, default=0.0,
+                        help='Trọng số RKD cho cặp Sketch-Photo.')
+    parser.add_argument('--lambda_rkd_ph_txt', type=float, default=0.0,
+                        help='Trọng số RKD cho cặp Photo-Text.')
+    parser.add_argument('--lambda_rkd_sk_txt', type=float, default=0.0,
+                        help='Trọng số RKD cho cặp Sketch-Text.')
+    parser.add_argument('--rkd_temperature', type=float, default=0.07,
+                        help='Temperature cho RKD (áp dụng cho Softmax phân bố khoảng cách).')
+                        
     parser.add_argument('--exp_name', type=str, default='Co_prompt')
 
 

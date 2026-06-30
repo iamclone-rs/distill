@@ -33,6 +33,26 @@ def cross_loss(feature_1, feature_2, args):
     return nn.CrossEntropyLoss()(logits, labels)
 
 
+def rkd_loss(student_feat1, student_feat2, teacher_feat1, teacher_feat2, temperature=0.07):
+    """
+    Relational Knowledge Distillation sử dụng KL-Divergence trên cosine similarity matrix.
+    Ép phân bố tương quan giữa (feat1, feat2) của Student phải giống với của Teacher.
+    """
+    s1 = F.normalize(student_feat1, dim=-1)
+    s2 = F.normalize(student_feat2, dim=-1)
+    t1 = F.normalize(teacher_feat1, dim=-1)
+    t2 = F.normalize(teacher_feat2, dim=-1)
+
+    sim_s = (s1 @ s2.t()) / temperature
+    log_p_s = F.log_softmax(sim_s, dim=-1)
+
+    with torch.no_grad():
+        sim_t = (t1 @ t2.t()) / temperature
+        p_t = F.softmax(sim_t, dim=-1)
+
+    return F.kl_div(log_p_s, p_t, reduction='batchmean')
+
+
 def nt_xent(features_view1: torch.Tensor, features_view2: torch.Tensor):
     """
     NT-Xent for SimCLR
@@ -85,30 +105,54 @@ def loss_fn(args, model, features, mode='train'):
     loss_ce_sk = F.cross_entropy(sk_logits, label)
     loss_cls = loss_ce_photo + loss_ce_sk
 
-    lambda_photo_distill = getattr(args, "lambda_photo_distill", 0.0)
-    lambda_sketch_distill = getattr(args, "lambda_sketch_distill", 0.0)
-    lambda_text_distill = getattr(args, "lambda_text_distill", 0.0)
-    loss_image_distill = torch.tensor(0.0, device=pos_logits.device)
+    if getattr(args, "use_rkd", False):
+        temp = getattr(args, "rkd_temperature", 0.07)
+        loss_image_distill = torch.tensor(0.0, device=pos_logits.device)
+        loss_text_distill = torch.tensor(0.0, device=pos_logits.device)
 
-    if lambda_photo_distill > 0:
-        loss_distill_photo = cross_loss(photo_distill_features, photo_aug_features, args)
-        loss_image_distill = loss_image_distill + lambda_photo_distill * loss_distill_photo
+        # 1. RKD Sketch-Photo (Thay thế InfoNCE Photo/Sketch Distill cũ)
+        lambda_rkd_sk_ph = getattr(args, "lambda_rkd_sk_ph", 0.0)
+        if lambda_rkd_sk_ph > 0:
+            rkd_sk_ph = rkd_loss(sk_distill_features, photo_distill_features, sk_aug_features, photo_aug_features, temp)
+            loss_image_distill = loss_image_distill + lambda_rkd_sk_ph * rkd_sk_ph
 
-    if lambda_sketch_distill > 0:
-        loss_distill_sk = cross_loss(sk_distill_features, sk_aug_features, args)
-        loss_image_distill = loss_image_distill + lambda_sketch_distill * loss_distill_sk
+        # 2. RKD Photo-Text và Sketch-Text (Hỗ trợ Zero-Shot)
+        lambda_rkd_ph_txt = getattr(args, "lambda_rkd_ph_txt", 0.0)
+        lambda_rkd_sk_txt = getattr(args, "lambda_rkd_sk_txt", 0.0)
 
-    loss_text_distill = torch.tensor(0.0, device=pos_logits.device)
-    if (
-        lambda_text_distill > 0
-        and teacher_text_features is not None
-        and photo_text_distill_features is not None
-        and sk_text_distill_features is not None
-    ):
-        loss_text_distill = (
-            cross_loss(photo_text_distill_features, teacher_text_features, args)
-            + cross_loss(sk_text_distill_features, teacher_text_features, args)
-        )
+        if (lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0) and teacher_text_features is not None:
+            if lambda_rkd_ph_txt > 0 and photo_text_distill_features is not None:
+                rkd_ph_txt = rkd_loss(photo_distill_features, photo_text_distill_features, photo_aug_features, teacher_text_features, temp)
+                loss_text_distill = loss_text_distill + lambda_rkd_ph_txt * rkd_ph_txt
+                
+            if lambda_rkd_sk_txt > 0 and sk_text_distill_features is not None:
+                rkd_sk_txt = rkd_loss(sk_distill_features, sk_text_distill_features, sk_aug_features, teacher_text_features, temp)
+                loss_text_distill = loss_text_distill + lambda_rkd_sk_txt * rkd_sk_txt
+    else:
+        lambda_photo_distill = getattr(args, "lambda_photo_distill", 0.0)
+        lambda_sketch_distill = getattr(args, "lambda_sketch_distill", 0.0)
+        lambda_text_distill = getattr(args, "lambda_text_distill", 0.0)
+        loss_image_distill = torch.tensor(0.0, device=pos_logits.device)
+    
+        if lambda_photo_distill > 0:
+            loss_distill_photo = cross_loss(photo_distill_features, photo_aug_features, args)
+            loss_image_distill = loss_image_distill + lambda_photo_distill * loss_distill_photo
+    
+        if lambda_sketch_distill > 0:
+            loss_distill_sk = cross_loss(sk_distill_features, sk_aug_features, args)
+            loss_image_distill = loss_image_distill + lambda_sketch_distill * loss_distill_sk
+    
+        loss_text_distill = torch.tensor(0.0, device=pos_logits.device)
+        if (
+            lambda_text_distill > 0
+            and teacher_text_features is not None
+            and photo_text_distill_features is not None
+            and sk_text_distill_features is not None
+        ):
+            loss_text_distill = (
+                cross_loss(photo_text_distill_features, teacher_text_features, args)
+                + cross_loss(sk_text_distill_features, teacher_text_features, args)
+            )
 
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(
