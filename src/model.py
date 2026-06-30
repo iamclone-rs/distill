@@ -363,19 +363,10 @@ class CustomCLIP(nn.Module):
 
         if self._image_distill_active and not self._train_teacher_ln:
             with torch.no_grad():
-                if train_photo_distill and train_sketch_distill:
-                    if self._use_strong_teacher:
-                        aug_cat = self.teacher_image_input(torch.cat([photo_aug_tensor, sk_aug_tensor], dim=0))
-                    else:
-                        aug_cat = torch.cat([photo_aug_tensor, sk_aug_tensor], dim=0)
-                    aug_feats = self.model_distill.encode_image(aug_cat)
-                    B = photo_aug_tensor.shape[0]
-                    photo_aug_features = aug_feats[:B]
-                    sk_aug_features = aug_feats[B:]
-                elif train_photo_distill:
+                if train_photo_distill:
                     teacher_input = self.teacher_image_input(photo_aug_tensor)
                     photo_aug_features = self.model_distill.encode_image(teacher_input)
-                elif train_sketch_distill:
+                if train_sketch_distill:
                     teacher_input = self.teacher_image_input(sk_aug_tensor)
                     sk_aug_features = self.model_distill.encode_image(teacher_input)
         elif self._train_teacher_ln:
