@@ -291,13 +291,14 @@ class CustomCLIP(nn.Module):
                 f"student feature 512 -> {self._distill_proj_dim}"
             )
         self._need_teacher_text = self._distill_text
-        if self._distill_text:
+        self._project_text = self._lambda_text_distill > 0 or (self._use_distill_proj and self._distill_text)
+        if self._project_text:
             self.text_distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
         if self._need_teacher_text:
             self._teacher_text_cache = {}
-        if self._distill_text:
+        if self._project_text:
             print(
-                "[Distill] distill_text=True -> "
+                "[Distill] project_text=True -> "
                 f"student text 512 -> {self._distill_proj_dim}"
             )
         print(
@@ -334,7 +335,7 @@ class CustomCLIP(nn.Module):
         return self.distill_proj(feature.type(self.dtype))
 
     def project_text_distill_feature(self, feature):
-        if not self._distill_text:
+        if not getattr(self, "_project_text", False):
             return feature
         return self.text_distill_proj(feature.type(self.dtype))
 
