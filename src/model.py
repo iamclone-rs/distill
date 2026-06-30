@@ -253,10 +253,20 @@ class CustomCLIP(nn.Module):
         self._lambda_photo_distill = getattr(cfg, "lambda_photo_distill", 0.0)
         self._lambda_sketch_distill = getattr(cfg, "lambda_sketch_distill", 0.0)
         self._lambda_text_distill = getattr(cfg, "lambda_text_distill", 0.0)
+        
+        use_rkd = getattr(cfg, "use_rkd", False)
+        lambda_rkd_sk_ph = getattr(cfg, "lambda_rkd_sk_ph", 0.0)
+        lambda_rkd_ph_txt = getattr(cfg, "lambda_rkd_ph_txt", 0.0)
+        lambda_rkd_sk_txt = getattr(cfg, "lambda_rkd_sk_txt", 0.0)
+
         self._image_distill_active = (
-            self._lambda_photo_distill > 0 or self._lambda_sketch_distill > 0
+            self._lambda_photo_distill > 0 or self._lambda_sketch_distill > 0 or
+            (use_rkd and (lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0))
         )
-        self._distill_text = self._lambda_text_distill > 0
+        self._distill_text = (
+            self._lambda_text_distill > 0 or
+            (use_rkd and (lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0))
+        )
         self._distill_proj_requested = getattr(cfg, "use_distill_proj", False)
         self._teacher_fp16 = (
             self._use_strong_teacher
@@ -423,8 +433,13 @@ class CustomCLIP(nn.Module):
         )
         _, neg_feature, neg_raw_feature = self.get_logits(neg_tensor, classnames)
         
-        train_photo_distill = self._lambda_photo_distill > 0
-        train_sketch_distill = self._lambda_sketch_distill > 0
+        use_rkd = getattr(self.cfg, "use_rkd", False)
+        lambda_rkd_sk_ph = getattr(self.cfg, "lambda_rkd_sk_ph", 0.0)
+        lambda_rkd_ph_txt = getattr(self.cfg, "lambda_rkd_ph_txt", 0.0)
+        lambda_rkd_sk_txt = getattr(self.cfg, "lambda_rkd_sk_txt", 0.0)
+        
+        train_photo_distill = self._lambda_photo_distill > 0 or (use_rkd and (lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0))
+        train_sketch_distill = self._lambda_sketch_distill > 0 or (use_rkd and (lambda_rkd_sk_ph > 0 or lambda_rkd_sk_txt > 0))
         photo_aug_features = photo_feature.detach()
         sk_aug_features = sk_feature.detach()
 
