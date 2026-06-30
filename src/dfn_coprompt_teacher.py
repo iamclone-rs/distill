@@ -194,13 +194,16 @@ class DFNCoPromptTeacher(nn.Module):
         visual_deep_prompts = self._deep_visual_prompts(prompt_learner)
         image_features = self._visual_forward(image, shared_ctx, visual_deep_prompts)
 
+        adapter_photo_dtype = self.adapter_photo.fc[0].weight.dtype
+        adapter_text_dtype = self.adapter_text.fc[0].weight.dtype
+
         image_features = (
-            self.image_adapter_m * self.adapter_photo(image_features.float())
-            + (1 - self.image_adapter_m) * image_features.float()
+            self.image_adapter_m * self.adapter_photo(image_features.to(adapter_photo_dtype))
+            + (1 - self.image_adapter_m) * image_features.to(adapter_photo_dtype)
         )
         text_features = (
-            self.text_adapter_m * self.adapter_text(text_features.float())
-            + (1 - self.text_adapter_m) * text_features.float()
+            self.text_adapter_m * self.adapter_text(text_features.to(adapter_text_dtype))
+            + (1 - self.text_adapter_m) * text_features.to(adapter_text_dtype)
         )
 
         image_norm = F.normalize(image_features, dim=-1)
@@ -235,8 +238,9 @@ class DFNCoPromptTeacher(nn.Module):
         photo_text = self.text_encoder(photo_prompts, photo_tokens)
         sketch_text = self.text_encoder(sketch_prompts, sketch_tokens)
         text_features = 0.5 * (photo_text.float() + sketch_text.float())
+        adapter_text_dtype = self.adapter_text.fc[0].weight.dtype
         text_features = (
-            self.text_adapter_m * self.adapter_text(text_features)
-            + (1 - self.text_adapter_m) * text_features
+            self.text_adapter_m * self.adapter_text(text_features.to(adapter_text_dtype))
+            + (1 - self.text_adapter_m) * text_features.to(adapter_text_dtype)
         )
         return F.normalize(text_features, dim=-1)
