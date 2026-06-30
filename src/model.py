@@ -503,7 +503,7 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, self.model, features=features, mode='train')
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
-            self.log(f'{k}', v, on_step=True, on_epoch=False, prog_bar=True)
+            self.log(f'{k}', v, on_step=True, on_epoch=False, prog_bar=False)
         return loss
     
     def validation_step(self, batch, batch_idx, dataloader_idx):
