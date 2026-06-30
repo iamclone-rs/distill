@@ -65,24 +65,41 @@ def print_base_loss_weights(args):
         f"triplet={args.lambda_triplet}, "
         f"nt_xent={args.lambda_nt_xent}"
     )
+    print(f"[Seed] seed={args.seed}")
 
 
-def get_datasets(args):
-    seed = 42
+def seed_everything(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def get_datasets(args):
+    seed_everything(args.seed)
     
     train_dataset = TrainDataset(args, args.proportion)
     val_sketch = ValidDataset(args, mode='sketch')
     val_photo = ValidDataset(args)
+
+    generator = torch.Generator()
+    generator.manual_seed(args.seed)
 
     loader_kwargs = dict(
         num_workers=args.workers,
         pin_memory=True,           # Transfer CPU→GPU nhanh hơn (non-blocking)
         persistent_workers=args.workers > 0,  # Giữ worker sống giữa các epoch
         prefetch_factor=4 if args.workers > 0 else None,  # Pre-load 4 batch trước
+        worker_init_fn=seed_worker,
+        generator=generator,
     )
 
     train_loader = DataLoader(
@@ -124,6 +141,8 @@ if __name__ == "__main__":
     parser.add_argument("--distill", type=str, default="cosine")
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--proportion", type=float, default=1.0)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
     parser.add_argument("--alpha", type=float, default=0.8)
     parser.add_argument("--gamma", type=float, default=0.1)
     parser.add_argument("--beta", type=float, default=0.1)
