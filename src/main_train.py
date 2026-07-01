@@ -14,21 +14,13 @@ from src.utils import get_all_categories
 
 
 def print_run_config(args):
-    if getattr(args, 'use_rkd', False):
-        print(
-            "[RKD Distill] weights -> "
-            f"sk_ph={getattr(args, 'lambda_rkd_sk_ph', 0.0)}, "
-            f"ph_txt={getattr(args, 'lambda_rkd_ph_txt', 0.0)}, "
-            f"sk_txt={getattr(args, 'lambda_rkd_sk_txt', 0.0)}, "
-            f"temp={getattr(args, 'rkd_temperature', 0.07)}"
-        )
-    else:
-        print(
-            "[Distill] branch weights -> "
-            f"photo={args.lambda_photo_distill}, "
-            f"sketch={args.lambda_sketch_distill}, "
-            f"text={args.lambda_text_distill}"
-        )
+    print(
+        "[KD-div Distill] weights -> "
+        f"sk_ph={getattr(args, 'lambda_rkd_sk_ph', 0.0)}, "
+        f"ph_txt={getattr(args, 'lambda_rkd_ph_txt', 0.0)}, "
+        f"sk_txt={getattr(args, 'lambda_rkd_sk_txt', 0.0)}, "
+        f"temp={getattr(args, 'rkd_temperature', 0.07)}"
+    )
 
     print(
         "[Loss] base weights -> "
@@ -39,7 +31,6 @@ def print_run_config(args):
     print(
         "[Run] "
         f"dataset={args.dataset}, teacher={args.teacher}, "
-        f"use_distill_proj={args.use_distill_proj}, "
         f"quantize_fp16={args.quantize_fp16}, "
         f"teacher_ckpt={args.teacher_ckpt or 'default'}, seed={args.seed}"
     )
@@ -111,7 +102,12 @@ if __name__ == "__main__":
     parser.add_argument("--n_ctx", type=int, default=1)
     parser.add_argument("--img_ctx", type=int, default=2)
     parser.add_argument("--max_size", type=int, default=224)
-    parser.add_argument("--prompt_depth", type=int, default=12)
+    parser.add_argument(
+        "--prompt_depth",
+        type=int,
+        default=1,
+        help="Số tầng prompt. Mặc định 1 = chỉ shallow prompt, không chèn deep prompt vào các layer sau.",
+    )
     parser.add_argument("--use_classes", type=int, default=104)
     parser.add_argument("--data_split", type=int, default=-1)
     parser.add_argument("--prec", type=str, default="fp16")
@@ -146,32 +142,23 @@ if __name__ == "__main__":
                         choices=['clip32', 'dfn5b'],
                         help=(
                             "Teacher model cho distillation:\n"
-                            "  clip32 → CLIP ViT-B/32 (mặc định, cross_loss)\n"
+                            "  clip32 → không dùng strong teacher\n"
                             "  dfn5b  → DFN5B-CLIP-H/14 1024-dim (cần open-clip-torch)"
                         ))
     parser.add_argument('--quantize_fp16', action='store_true', default=False,
                         help='Chạy strong teacher dfn5b ở FP16 để giảm VRAM và tăng tốc.')
     parser.add_argument('--teacher_ckpt', type=str, default='',
                         help='Đường dẫn checkpoint để load weight cho strong teacher dfn5b.')
-    parser.add_argument('--lambda_photo_distill', type=float, default=0.0,
-                        help='Trọng số trực tiếp cho photo distillation loss.')
-    parser.add_argument('--use_distill_proj', action='store_true', default=False,
-                        help='Thêm linear projection student sang teacher dim rồi distill bằng cross_loss InfoNCE.')
-    parser.add_argument('--lambda_sketch_distill', type=float, default=0.0,
-                        help='Trọng số trực tiếp cho sketch distillation loss.')
-    parser.add_argument('--lambda_text_distill', type=float, default=0.0,
-                        help='Trọng số riêng cho text distillation loss.')
-                        
     parser.add_argument('--use_rkd', action='store_true', default=False,
-                        help='Sử dụng Relational Knowledge Distillation bằng KL-Divergence.')
+                        help=argparse.SUPPRESS)
     parser.add_argument('--lambda_rkd_sk_ph', type=float, default=0.0,
-                        help='Trọng số RKD cho cặp Sketch-Photo.')
+                        help='Trọng số KD-div cho ma trận quan hệ Sketch-Photo.')
     parser.add_argument('--lambda_rkd_ph_txt', type=float, default=0.0,
-                        help='Trọng số RKD cho cặp Photo-Text.')
+                        help='Trọng số KD-div cho ma trận quan hệ Photo-Text.')
     parser.add_argument('--lambda_rkd_sk_txt', type=float, default=0.0,
-                        help='Trọng số RKD cho cặp Sketch-Text.')
+                        help='Trọng số KD-div cho ma trận quan hệ Sketch-Text.')
     parser.add_argument('--rkd_temperature', type=float, default=0.07,
-                        help='Temperature cho RKD (áp dụng cho Softmax phân bố khoảng cách).')
+                        help='Temperature cho KD-div similarity distribution.')
                         
     parser.add_argument('--exp_name', type=str, default='Co_prompt')
 

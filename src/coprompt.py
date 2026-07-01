@@ -25,15 +25,13 @@ class TextEncoder(nn.Module):
     def forward(self, prompts, tokenized_prompts, return_all=False):
         x = prompts + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
-        # Pass as the list, as nn.sequential cannot process multiple arguments in the forward pass
         
         txt_guided_prompts = []
         for block in self.resblocks:
             x = block(x)
-            
-            prompt_tok = x[1:self.args.n_ctx + 1,:, :]
-            prompt_tok = prompt_tok.permute(1, 0, 2)
-            txt_guided_prompts.append(prompt_tok)
+            if return_all:
+                prompt_tok = x[1:self.args.n_ctx + 1, :, :]
+                txt_guided_prompts.append(prompt_tok.permute(1, 0, 2))
             
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
@@ -63,9 +61,7 @@ class MultiModalPromptLearner(nn.Module):
         cfg_imsize = cfg.max_size
         
         self.dropout_layer = nn.Dropout(p=0.1)
-        self.compound_prompts_depth = (
-            cfg.prompt_depth
-        )  # max=12, but will create 11 such shared prompts
+        self.compound_prompts_depth = max(1, int(getattr(cfg, "prompt_depth", 1)))
         assert (
             cfg_imsize == clip_imsize
         ), f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
@@ -87,8 +83,9 @@ class MultiModalPromptLearner(nn.Module):
         self.prompt_prefix = prompt_prefix
         self.proj = nn.Linear(ctx_dim, 768)
         single_layer = nn.Linear(ctx_dim, 768)
+        num_deep_prompts = max(0, self.compound_prompts_depth - 1)
         self.compound_prompt_projections = get_clones(
-            single_layer, self.compound_prompts_depth - 1
+            single_layer, num_deep_prompts
         )
         
         if dtype == torch.float16:

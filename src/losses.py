@@ -5,38 +5,10 @@ from torch.nn import functional as F
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def cross_loss(feature_1, feature_2, args):
-    labels = torch.cat([torch.arange(len(feature_1)) for _ in range(2)], dim=0)
-    labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
-    labels = labels.to(device)
-
-    feature_1 = F.normalize(feature_1, dim=1)
-    feature_2 = F.normalize(feature_2, dim=1)
-    features = torch.cat((feature_1, feature_2), dim=0)  # (2*B, Feat_dim)
-
-    similarity_matrix = torch.matmul(features, features.T)  # (2*B, 2*B)
-
-    # discard the main diagonal from both: labels and similarities matrix
-    mask = torch.eye(labels.shape[0], dtype=torch.bool).to(device)
-    labels = labels[~mask].view(labels.shape[0], -1)
-    similarity_matrix = similarity_matrix[~mask].view(similarity_matrix.shape[0], -1)  # (2*B, 2*B - 1)
-
-    # select and combine multiple positives
-    positives = similarity_matrix[labels.bool()].view(labels.shape[0], -1)  # (2*B, 1)
-    negatives = similarity_matrix[~labels.bool()].view(similarity_matrix.shape[0], -1)  # (2*B, 2*(B - 1))
-
-    logits = torch.cat([positives, negatives], dim=1)
-    labels = torch.zeros(logits.shape[0], dtype=torch.long).to(device)
-
-    logits = logits / args.temperature
-
-    return nn.CrossEntropyLoss()(logits, labels)
-
-
-def rkd_loss(student_feat1, student_feat2, teacher_feat1, teacher_feat2, temperature=0.07):
+def kd_div_loss(student_feat1, student_feat2, teacher_feat1, teacher_feat2, temperature=0.07):
     """
-    Relational Knowledge Distillation sử dụng KL-Divergence trên cosine similarity matrix.
-    Ép phân bố tương quan giữa (feat1, feat2) của Student phải giống với của Teacher.
+    KL-divergence distillation trên cosine similarity matrix.
+    Ép phân bố quan hệ giữa hai tập feature của student giống teacher.
     """
     s1 = F.normalize(student_feat1, dim=-1)
     s2 = F.normalize(student_feat2, dim=-1)
@@ -51,6 +23,22 @@ def rkd_loss(student_feat1, student_feat2, teacher_feat1, teacher_feat2, tempera
         p_t = F.softmax(sim_t, dim=-1)
 
     return F.kl_div(log_p_s, p_t, reduction='batchmean')
+
+
+def add_kd_div(loss_distill, loss_dict, name, weight, student_feat1, student_feat2, teacher_feat1, teacher_feat2, temperature):
+    if weight <= 0 or student_feat1 is None or student_feat2 is None or teacher_feat1 is None or teacher_feat2 is None:
+        return loss_distill
+
+    loss_value = kd_div_loss(
+        student_feat1,
+        student_feat2,
+        teacher_feat1,
+        teacher_feat2,
+        temperature,
+    )
+    loss_distill = loss_distill + weight * loss_value
+    loss_dict[name] = loss_value
+    return loss_distill
 
 
 def nt_xent(features_view1: torch.Tensor, features_view2: torch.Tensor):
@@ -107,55 +95,40 @@ def loss_fn(args, model, features, mode='train'):
     loss_dict = {}
     loss_distill = torch.tensor(0.0, device=pos_logits.device)
 
-    if getattr(args, "use_rkd", False):
-        temp = getattr(args, "rkd_temperature", 0.07)
-
-        lambda_rkd_sk_ph = getattr(args, "lambda_rkd_sk_ph", 0.0)
-        if lambda_rkd_sk_ph > 0:
-            rkd_sk_ph = rkd_loss(sk_distill_features, photo_distill_features, sk_aug_features, photo_aug_features, temp)
-            loss_distill = loss_distill + lambda_rkd_sk_ph * rkd_sk_ph
-            loss_dict['rkd_sk_ph'] = rkd_sk_ph
-
-        lambda_rkd_ph_txt = getattr(args, "lambda_rkd_ph_txt", 0.0)
-        lambda_rkd_sk_txt = getattr(args, "lambda_rkd_sk_txt", 0.0)
-
-        if (lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0) and teacher_text_features is not None:
-            if lambda_rkd_ph_txt > 0 and photo_text_distill_features is not None:
-                rkd_ph_txt = rkd_loss(photo_distill_features, photo_text_distill_features, photo_aug_features, teacher_text_features, temp)
-                loss_distill = loss_distill + lambda_rkd_ph_txt * rkd_ph_txt
-                loss_dict['rkd_ph_txt'] = rkd_ph_txt
-                
-            if lambda_rkd_sk_txt > 0 and sk_text_distill_features is not None:
-                rkd_sk_txt = rkd_loss(sk_distill_features, sk_text_distill_features, sk_aug_features, teacher_text_features, temp)
-                loss_distill = loss_distill + lambda_rkd_sk_txt * rkd_sk_txt
-                loss_dict['rkd_sk_txt'] = rkd_sk_txt
-    else:
-        lambda_photo_distill = getattr(args, "lambda_photo_distill", 0.0)
-        lambda_sketch_distill = getattr(args, "lambda_sketch_distill", 0.0)
-        lambda_text_distill = getattr(args, "lambda_text_distill", 0.0)
-    
-        if lambda_photo_distill > 0:
-            loss_distill_photo = cross_loss(photo_distill_features, photo_aug_features, args)
-            loss_distill = loss_distill + lambda_photo_distill * loss_distill_photo
-            loss_dict['distill_photo'] = loss_distill_photo
-    
-        if lambda_sketch_distill > 0:
-            loss_distill_sk = cross_loss(sk_distill_features, sk_aug_features, args)
-            loss_distill = loss_distill + lambda_sketch_distill * loss_distill_sk
-            loss_dict['distill_sk'] = loss_distill_sk
-    
-        if (
-            lambda_text_distill > 0
-            and teacher_text_features is not None
-            and photo_text_distill_features is not None
-            and sk_text_distill_features is not None
-        ):
-            loss_text_distill = (
-                cross_loss(photo_text_distill_features, teacher_text_features, args)
-                + cross_loss(sk_text_distill_features, teacher_text_features, args)
-            )
-            loss_distill = loss_distill + lambda_text_distill * loss_text_distill
-            loss_dict['distill_text'] = loss_text_distill
+    temp = getattr(args, "rkd_temperature", 0.07)
+    loss_distill = add_kd_div(
+        loss_distill,
+        loss_dict,
+        "kd_sk_ph",
+        getattr(args, "lambda_rkd_sk_ph", 0.0),
+        sk_distill_features,
+        photo_distill_features,
+        sk_aug_features,
+        photo_aug_features,
+        temp,
+    )
+    loss_distill = add_kd_div(
+        loss_distill,
+        loss_dict,
+        "kd_ph_txt",
+        getattr(args, "lambda_rkd_ph_txt", 0.0),
+        photo_distill_features,
+        photo_text_distill_features,
+        photo_aug_features,
+        teacher_text_features,
+        temp,
+    )
+    loss_distill = add_kd_div(
+        loss_distill,
+        loss_dict,
+        "kd_sk_txt",
+        getattr(args, "lambda_rkd_sk_txt", 0.0),
+        sk_distill_features,
+        sk_text_distill_features,
+        sk_aug_features,
+        teacher_text_features,
+        temp,
+    )
 
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(

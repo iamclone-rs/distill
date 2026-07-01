@@ -6,12 +6,7 @@ import pytorch_lightning as pl
 from torch.nn import functional as F
 from collections import defaultdict
 from torchmetrics.functional import retrieval_average_precision #, retrieval_precision
-
-try:
-    import open_clip
-    OPEN_CLIP_AVAILABLE = True
-except ImportError:
-    OPEN_CLIP_AVAILABLE = False
+import open_clip
 
 from src.coprompt import MultiModalPromptLearner, Adapter, TextEncoder
 from src.utils import load_clip_to_cpu, get_all_categories, retrieval_precision, visualize_tsne
@@ -32,17 +27,10 @@ _TEACHER_REGISTRY = {
 def _needs_strong_teacher(args):
     if getattr(args, "teacher", "clip32") == "clip32":
         return False
-    if getattr(args, "use_rkd", False):
-        return (
-            getattr(args, "lambda_rkd_sk_ph", 0.0) > 0
-            or getattr(args, "lambda_rkd_ph_txt", 0.0) > 0
-            or getattr(args, "lambda_rkd_sk_txt", 0.0) > 0
-        )
-
     return (
-        getattr(args, "lambda_photo_distill", 0.0) > 0
-        or getattr(args, "lambda_sketch_distill", 0.0) > 0
-        or getattr(args, "lambda_text_distill", 0.0) > 0
+        getattr(args, "lambda_rkd_sk_ph", 0.0) > 0
+        or getattr(args, "lambda_rkd_ph_txt", 0.0) > 0
+        or getattr(args, "lambda_rkd_sk_txt", 0.0) > 0
     )
 
 
@@ -131,30 +119,24 @@ def _load_teacher(args):
     Trả về strong_teacher model (frozen) hoặc None.
 
     args.teacher:
-        'clip32'  → None  (dùng clip_model_distill ViT-B/32, hành vi gốc)
+        'clip32'  → None  (không dùng strong teacher)
         'dfn5b'   → DFN5B-CLIP-H/14 (1024-dim, frozen, via open_clip)
 
     """
     teacher_key = getattr(args, "teacher", "clip32")
 
     if teacher_key == "clip32":
-        print("[Teacher] clip32 (ViT-B/32) — hành vi gốc, cross_loss")
+        print("[Teacher] clip32 (ViT-B/32) -> không dùng strong teacher")
         return None
 
     if not _needs_strong_teacher(args):
-        print(f"[Teacher] {teacher_key} được chọn nhưng distill weight = 0 -> bỏ qua strong teacher")
+        print(f"[Teacher] {teacher_key} được chọn nhưng KD-div weight = 0 -> bỏ qua strong teacher")
         return None
 
     if teacher_key not in _TEACHER_REGISTRY:
         raise ValueError(
             f"Teacher '{teacher_key}' không hợp lệ. "
             f"Chọn một trong: clip32, {', '.join(_TEACHER_REGISTRY)}"
-        )
-
-    if not OPEN_CLIP_AVAILABLE:
-        raise ImportError(
-            f"Teacher '{teacher_key}' yêu cầu open_clip. "
-            "Cài bằng: pip install open-clip-torch"
         )
 
     model_name, pretrained = _TEACHER_REGISTRY[teacher_key]
@@ -226,70 +208,34 @@ class CustomCLIP(nn.Module):
         self.adapter_photo = Adapter(512, 4).to(clip_model.dtype)
         self.adapter_text = Adapter(512, 4).to(clip_model.dtype)
         
-        # strong_teacher=None  → clip32 (giữ nguyên hành vi gốc)
-        # strong_teacher=<model> → DFN5B, output 1024-dim, dùng RKD loss
+        # strong_teacher=<model> -> DFN5B frozen, dùng KD-div trên similarity matrix
         if strong_teacher is not None:
             self.model_distill = strong_teacher
             self._use_strong_teacher = True
         else:
             self.model_distill = clip_model_distill
             self._use_strong_teacher = False
-        self._lambda_photo_distill = getattr(cfg, "lambda_photo_distill", 0.0)
-        self._lambda_sketch_distill = getattr(cfg, "lambda_sketch_distill", 0.0)
-        self._lambda_text_distill = getattr(cfg, "lambda_text_distill", 0.0)
         
-        use_rkd = getattr(cfg, "use_rkd", False)
         lambda_rkd_sk_ph = getattr(cfg, "lambda_rkd_sk_ph", 0.0)
         lambda_rkd_ph_txt = getattr(cfg, "lambda_rkd_ph_txt", 0.0)
         lambda_rkd_sk_txt = getattr(cfg, "lambda_rkd_sk_txt", 0.0)
 
         self._image_distill_active = (
-            self._lambda_photo_distill > 0 or self._lambda_sketch_distill > 0 or
-            (use_rkd and (lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0))
+            lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
         )
-        self._distill_text = (
-            self._lambda_text_distill > 0 or
-            (use_rkd and (lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0))
-        )
-        self._distill_proj_requested = getattr(cfg, "use_distill_proj", False)
+        self._need_teacher_text = lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
         self._teacher_fp16 = (
             self._use_strong_teacher
             and getattr(cfg, "quantize_fp16", False)
             and device.type == "cuda"
         )
-        self._distill_proj_dim = 1024 if self._use_strong_teacher else 512
-        
-        old_distill_active = (self._lambda_photo_distill > 0 or self._lambda_sketch_distill > 0 or self._lambda_text_distill > 0)
-        if self._use_strong_teacher and old_distill_active and not self._distill_proj_requested:
-            raise ValueError(
-                "Strong teacher output 1024-dim, student output 512-dim. "
-                "Hãy bật --use_distill_proj khi dùng thuật toán InfoNCE cũ."
-            )
-        self._use_distill_proj = self._distill_proj_requested and (
-            self._image_distill_active
-        )
-        if self._use_distill_proj:
-            self.distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
-            print(
-                "[Distill] use_distill_proj=True -> "
-                f"student feature 512 -> {self._distill_proj_dim}"
-            )
-        self._need_teacher_text = self._distill_text
-        self._project_text = self._lambda_text_distill > 0 or (self._use_distill_proj and self._distill_text)
-        if self._project_text:
-            self.text_distill_proj = nn.Linear(512, self._distill_proj_dim, bias=False).to(clip_model.dtype)
         if self._need_teacher_text:
             self._teacher_text_cache = {}
-        if self._project_text:
-            print(
-                "[Distill] project_text=True -> "
-                f"student text 512 -> {self._distill_proj_dim}"
-            )
         print(
-            "[Distill] active branches -> "
-            f"photo={self._lambda_photo_distill > 0} ({self._lambda_photo_distill}), "
-            f"sketch={self._lambda_sketch_distill > 0} ({self._lambda_sketch_distill}), "
-            f"text={self._lambda_text_distill > 0} ({self._lambda_text_distill})"
+            "[KD-div] active branches -> "
+            f"sk_ph={lambda_rkd_sk_ph > 0} ({lambda_rkd_sk_ph}), "
+            f"ph_txt={lambda_rkd_ph_txt > 0} ({lambda_rkd_ph_txt}), "
+            f"sk_txt={lambda_rkd_sk_txt > 0} ({lambda_rkd_sk_txt})"
         )
         self.image_adapter_m = 0.1
         self.text_adapter_m = 0.1
@@ -313,16 +259,6 @@ class CustomCLIP(nn.Module):
             txt_guided_prompts
         )
     
-    def project_distill_feature(self, feature):
-        if not self._use_distill_proj:
-            return feature
-        return self.distill_proj(feature.type(self.dtype))
-
-    def project_text_distill_feature(self, feature):
-        if not getattr(self, "_project_text", False):
-            return feature
-        return self.text_distill_proj(feature.type(self.dtype))
-
     def teacher_image_input(self, image):
         if not self._use_strong_teacher:
             return image
@@ -367,9 +303,7 @@ class CustomCLIP(nn.Module):
             # deep_compound_prompts_vision,
         ) = prompt_learner(classnames)
         
-        text_features, _ = self.text_encoder(
-            prompts, tokenized_prompts, return_all=True
-        ) # (n_classes, 512)
+        text_features = self.text_encoder(prompts, tokenized_prompts) # (n_classes, 512)
 
         # init token random
         txt_guided_prompts = self.txt_guided_prompts
@@ -414,13 +348,12 @@ class CustomCLIP(nn.Module):
         )
         _, neg_feature, neg_raw_feature = self.get_logits(neg_tensor, classnames)
         
-        use_rkd = getattr(self.cfg, "use_rkd", False)
         lambda_rkd_sk_ph = getattr(self.cfg, "lambda_rkd_sk_ph", 0.0)
         lambda_rkd_ph_txt = getattr(self.cfg, "lambda_rkd_ph_txt", 0.0)
         lambda_rkd_sk_txt = getattr(self.cfg, "lambda_rkd_sk_txt", 0.0)
         
-        train_photo_distill = self._lambda_photo_distill > 0 or (use_rkd and (lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0))
-        train_sketch_distill = self._lambda_sketch_distill > 0 or (use_rkd and (lambda_rkd_sk_ph > 0 or lambda_rkd_sk_txt > 0))
+        train_photo_distill = lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0
+        train_sketch_distill = lambda_rkd_sk_ph > 0 or lambda_rkd_sk_txt > 0
         photo_aug_features = photo_feature.detach()
         sk_aug_features = sk_feature.detach()
 
@@ -432,11 +365,11 @@ class CustomCLIP(nn.Module):
                 if train_sketch_distill:
                     teacher_input = self.teacher_image_input(sk_aug_tensor)
                     sk_aug_features = self.model_distill.encode_image(teacher_input)
-        photo_distill_feature = self.project_distill_feature(photo_feature)
-        sk_distill_feature = self.project_distill_feature(sk_feature)
-        neg_distill_feature = self.project_distill_feature(neg_raw_feature)
-        photo_text_distill_feature = self.project_text_distill_feature(photo_text_feature)
-        sk_text_distill_feature = self.project_text_distill_feature(sk_text_feature)
+        photo_distill_feature = photo_feature
+        sk_distill_feature = sk_feature
+        neg_distill_feature = neg_raw_feature
+        photo_text_distill_feature = photo_text_feature
+        sk_text_distill_feature = sk_text_feature
         teacher_text_feature = self.get_teacher_text_features(classnames)
             
         return photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
@@ -500,9 +433,8 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, self.model, features=features, mode='train')
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
-            show_on_bar = k.startswith('rkd')
-            # Rút gọn tên để không bị vỡ giao diện
-            bar_name = k.replace("rkd_sk_ph", "R_SP").replace("rkd_ph_txt", "R_PT").replace("rkd_sk_txt", "R_ST")
+            show_on_bar = k.startswith('kd_')
+            bar_name = k.replace("kd_sk_ph", "KD_SP").replace("kd_ph_txt", "KD_PT").replace("kd_sk_txt", "KD_ST")
             self.log(bar_name, v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
         return loss
     
