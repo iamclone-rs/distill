@@ -207,6 +207,12 @@ class CustomCLIP(nn.Module):
         
         self.adapter_photo = Adapter(512, 4).to(clip_model.dtype)
         self.adapter_text = Adapter(512, 4).to(clip_model.dtype)
+        self._use_adapter = not getattr(cfg, "no_adap", False)
+        self.image_adapter_m = 0.1 if self._use_adapter else 0.0
+        self.text_adapter_m = 0.1 if self._use_adapter else 0.0
+        if not self._use_adapter:
+            self.adapter_photo.requires_grad_(False)
+            self.adapter_text.requires_grad_(False)
         
         # strong_teacher=<model> -> DFN5B frozen, dùng KD-div trên similarity matrix
         if strong_teacher is not None:
@@ -237,8 +243,11 @@ class CustomCLIP(nn.Module):
             f"ph_txt={lambda_rkd_ph_txt > 0} ({lambda_rkd_ph_txt}), "
             f"sk_txt={lambda_rkd_sk_txt > 0} ({lambda_rkd_sk_txt})"
         )
-        self.image_adapter_m = 0.1
-        self.text_adapter_m = 0.1
+        print(
+            "[Adapter] "
+            f"enabled={self._use_adapter}, "
+            f"image_m={self.image_adapter_m}, text_m={self.text_adapter_m}"
+        )
         self.saved_features = defaultdict(lambda: {"sketch": [], "photo": []})
 
         # init token random
@@ -319,15 +328,16 @@ class CustomCLIP(nn.Module):
                 img_tensor.type(self.dtype), shared_ctx, visual_deep_prompts
             ) # (batch_size, 768)
         
-        x_a = self.adapter_photo(image_features)
-        image_features = (
-            self.image_adapter_m * x_a + (1 - self.image_adapter_m) * image_features
-        )
+        if self._use_adapter:
+            x_a = self.adapter_photo(image_features)
+            image_features = (
+                self.image_adapter_m * x_a + (1 - self.image_adapter_m) * image_features
+            )
 
-        x_b = self.adapter_text(text_features)
-        text_features = (
-            self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_features
-        )
+            x_b = self.adapter_text(text_features)
+            text_features = (
+                self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_features
+            )
 
         image_features_normalize = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)

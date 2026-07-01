@@ -32,6 +32,7 @@ def print_run_config(args):
         "[Run] "
         f"dataset={args.dataset}, teacher={args.teacher}, "
         f"quantize_fp16={args.quantize_fp16}, "
+        f"no_adap={args.no_adap}, "
         f"teacher_ckpt={args.teacher_ckpt or 'default'}, seed={args.seed}"
     )
 
@@ -130,6 +131,8 @@ if __name__ == "__main__":
     parser.add_argument('--use_adapt_sk', type=bool, default=True)
     parser.add_argument('--use_adapt_ph', type=bool, default=True)
     parser.add_argument('--use_adapt_txt', type=bool, default=True)
+    parser.add_argument('--no_adap', action='store_true', default=False,
+                        help='Tắt image/text adapters trong forward và freeze tham số adapter.')
     parser.add_argument('--use_co_sk', type=bool, default=True)
     parser.add_argument('--use_co_ph', type=bool, default=True)
     parser.add_argument('--progress', action='store_true', default=False,
