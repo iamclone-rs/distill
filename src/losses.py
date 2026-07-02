@@ -41,6 +41,38 @@ def add_kd_div(loss_distill, loss_dict, name, weight, student_feat1, student_fea
     return loss_distill
 
 
+def infonce_distill_loss(student_feat, teacher_feat, temperature=0.07):
+    teacher_feat = teacher_feat.to(dtype=student_feat.dtype, device=student_feat.device)
+    student_feat = F.normalize(student_feat, dim=1)
+    teacher_feat = F.normalize(teacher_feat, dim=1)
+    features = torch.cat((student_feat, teacher_feat), dim=0)
+
+    labels = torch.cat([torch.arange(len(student_feat), device=student_feat.device) for _ in range(2)], dim=0)
+    labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
+
+    similarity_matrix = features @ features.t()
+    mask = torch.eye(labels.shape[0], dtype=torch.bool, device=student_feat.device)
+    labels = labels[~mask].view(labels.shape[0], -1)
+    similarity_matrix = similarity_matrix[~mask].view(similarity_matrix.shape[0], -1)
+
+    positives = similarity_matrix[labels.bool()].view(labels.shape[0], -1)
+    negatives = similarity_matrix[~labels.bool()].view(similarity_matrix.shape[0], -1)
+
+    logits = torch.cat([positives, negatives], dim=1) / temperature
+    targets = torch.zeros(logits.shape[0], dtype=torch.long, device=student_feat.device)
+    return F.cross_entropy(logits, targets)
+
+
+def add_infonce_distill(loss_distill, loss_dict, name, weight, student_feat, teacher_feat, temperature):
+    if weight <= 0 or student_feat is None or teacher_feat is None:
+        return loss_distill
+
+    loss_value = infonce_distill_loss(student_feat, teacher_feat, temperature)
+    loss_distill = loss_distill + weight * loss_value
+    loss_dict[name] = loss_value
+    return loss_distill
+
+
 def nt_xent(features_view1: torch.Tensor, features_view2: torch.Tensor):
     """
     NT-Xent for SimCLR
@@ -95,40 +127,86 @@ def loss_fn(args, model, features, mode='train'):
     loss_dict = {}
     loss_distill = torch.tensor(0.0, device=pos_logits.device)
 
-    temp = getattr(args, "rkd_temperature", 0.07)
-    loss_distill = add_kd_div(
-        loss_distill,
-        loss_dict,
-        "kd_sk_ph",
-        getattr(args, "lambda_rkd_sk_ph", 0.0),
-        sk_distill_features,
-        photo_distill_features,
-        sk_aug_features,
-        photo_aug_features,
-        temp,
-    )
-    loss_distill = add_kd_div(
-        loss_distill,
-        loss_dict,
-        "kd_ph_txt",
-        getattr(args, "lambda_rkd_ph_txt", 0.0),
-        photo_distill_features,
-        photo_text_distill_features,
-        photo_aug_features,
-        teacher_text_features,
-        temp,
-    )
-    loss_distill = add_kd_div(
-        loss_distill,
-        loss_dict,
-        "kd_sk_txt",
-        getattr(args, "lambda_rkd_sk_txt", 0.0),
-        sk_distill_features,
-        sk_text_distill_features,
-        sk_aug_features,
-        teacher_text_features,
-        temp,
-    )
+    distill_mode = getattr(args, "distill_mode", "kd_div")
+    if distill_mode == "kd_div":
+        temp = getattr(args, "rkd_temperature", 0.07)
+        loss_distill = add_kd_div(
+            loss_distill,
+            loss_dict,
+            "kd_sk_ph",
+            getattr(args, "lambda_rkd_sk_ph", 0.0),
+            sk_distill_features,
+            photo_distill_features,
+            sk_aug_features,
+            photo_aug_features,
+            temp,
+        )
+        loss_distill = add_kd_div(
+            loss_distill,
+            loss_dict,
+            "kd_ph_txt",
+            getattr(args, "lambda_rkd_ph_txt", 0.0),
+            photo_distill_features,
+            photo_text_distill_features,
+            photo_aug_features,
+            teacher_text_features,
+            temp,
+        )
+        loss_distill = add_kd_div(
+            loss_distill,
+            loss_dict,
+            "kd_sk_txt",
+            getattr(args, "lambda_rkd_sk_txt", 0.0),
+            sk_distill_features,
+            sk_text_distill_features,
+            sk_aug_features,
+            teacher_text_features,
+            temp,
+        )
+    elif distill_mode == "linear_infonce":
+        temp = getattr(args, "infonce_temperature", getattr(args, "temperature", 0.07))
+        loss_distill = add_infonce_distill(
+            loss_distill,
+            loss_dict,
+            "infonce_photo",
+            getattr(args, "lambda_infonce_photo", 0.0),
+            photo_distill_features,
+            photo_aug_features,
+            temp,
+        )
+        loss_distill = add_infonce_distill(
+            loss_distill,
+            loss_dict,
+            "infonce_sketch",
+            getattr(args, "lambda_infonce_sketch", 0.0),
+            sk_distill_features,
+            sk_aug_features,
+            temp,
+        )
+        lambda_text = getattr(args, "lambda_infonce_text", 0.0)
+        if lambda_text > 0 and teacher_text_features is not None:
+            loss_text = torch.tensor(0.0, device=pos_logits.device)
+            loss_text = add_infonce_distill(
+                loss_text,
+                loss_dict,
+                "infonce_photo_text",
+                1.0,
+                photo_text_distill_features,
+                teacher_text_features,
+                temp,
+            )
+            loss_text = add_infonce_distill(
+                loss_text,
+                loss_dict,
+                "infonce_sketch_text",
+                1.0,
+                sk_text_distill_features,
+                teacher_text_features,
+                temp,
+            )
+            loss_distill = loss_distill + lambda_text * loss_text
+    else:
+        raise ValueError(f"Unknown distill_mode: {distill_mode}")
 
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(

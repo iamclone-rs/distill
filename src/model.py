@@ -8,7 +8,7 @@ from collections import defaultdict
 from torchmetrics.functional import retrieval_average_precision #, retrieval_precision
 import open_clip
 
-from src.coprompt import MultiModalPromptLearner, Adapter, TextEncoder
+from src.coprompt import MultiModalPromptLearner, TextEncoder
 from src.utils import load_clip_to_cpu, get_all_categories, retrieval_precision, visualize_tsne
 from src.losses import loss_fn
 from src.data_config import VISUALIZE_CLASSES, UNSEEN_CLASSES
@@ -27,6 +27,13 @@ _TEACHER_REGISTRY = {
 def _needs_strong_teacher(args):
     if getattr(args, "teacher", "clip32") == "clip32":
         return False
+    distill_mode = getattr(args, "distill_mode", "kd_div")
+    if distill_mode == "linear_infonce":
+        return (
+            getattr(args, "lambda_infonce_photo", 0.0) > 0
+            or getattr(args, "lambda_infonce_sketch", 0.0) > 0
+            or getattr(args, "lambda_infonce_text", 0.0) > 0
+        )
     return (
         getattr(args, "lambda_rkd_sk_ph", 0.0) > 0
         or getattr(args, "lambda_rkd_ph_txt", 0.0) > 0
@@ -205,16 +212,7 @@ class CustomCLIP(nn.Module):
         self.text_encoder = TextEncoder(clip_model_distill, cfg)
         self.logit_scale = clip_model.logit_scale
         
-        self.adapter_photo = Adapter(512, 4).to(clip_model.dtype)
-        self.adapter_text = Adapter(512, 4).to(clip_model.dtype)
-        self._use_adapter = not getattr(cfg, "no_adap", False)
-        self.image_adapter_m = 0.1 if self._use_adapter else 0.0
-        self.text_adapter_m = 0.1 if self._use_adapter else 0.0
-        if not self._use_adapter:
-            self.adapter_photo.requires_grad_(False)
-            self.adapter_text.requires_grad_(False)
-        
-        # strong_teacher=<model> -> DFN5B frozen, dùng KD-div trên similarity matrix
+        # strong_teacher=<model> -> DFN5B frozen, dùng distillation target
         if strong_teacher is not None:
             self.model_distill = strong_teacher
             self._use_strong_teacher = True
@@ -222,51 +220,68 @@ class CustomCLIP(nn.Module):
             self.model_distill = clip_model_distill
             self._use_strong_teacher = False
         
+        self._distill_mode = getattr(cfg, "distill_mode", "kd_div")
         lambda_rkd_sk_ph = getattr(cfg, "lambda_rkd_sk_ph", 0.0)
         lambda_rkd_ph_txt = getattr(cfg, "lambda_rkd_ph_txt", 0.0)
         lambda_rkd_sk_txt = getattr(cfg, "lambda_rkd_sk_txt", 0.0)
+        lambda_infonce_photo = getattr(cfg, "lambda_infonce_photo", 0.0)
+        lambda_infonce_sketch = getattr(cfg, "lambda_infonce_sketch", 0.0)
+        lambda_infonce_text = getattr(cfg, "lambda_infonce_text", 0.0)
 
-        self._image_distill_active = (
+        self._kd_image_distill_active = (
             lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
         )
-        self._need_teacher_text = lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
+        self._infonce_image_distill_active = (
+            lambda_infonce_photo > 0 or lambda_infonce_sketch > 0
+        )
+        self._image_distill_active = (
+            self._kd_image_distill_active
+            if self._distill_mode == "kd_div"
+            else self._infonce_image_distill_active
+        )
+        self._need_teacher_text = (
+            (lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0)
+            if self._distill_mode == "kd_div"
+            else lambda_infonce_text > 0
+        )
         self._teacher_fp16 = (
             self._use_strong_teacher
             and getattr(cfg, "quantize_fp16", False)
             and device.type == "cuda"
         )
+        self._project_linear_infonce = self._distill_mode == "linear_infonce" and self._use_strong_teacher
+        if self._project_linear_infonce:
+            self.distill_proj = nn.Linear(512, 1024, bias=False).to(clip_model.dtype)
+            if self._need_teacher_text:
+                self.text_distill_proj = nn.Linear(512, 1024, bias=False).to(clip_model.dtype)
         if self._need_teacher_text:
             self._teacher_text_cache = {}
-        print(
-            "[KD-div] active branches -> "
-            f"sk_ph={lambda_rkd_sk_ph > 0} ({lambda_rkd_sk_ph}), "
-            f"ph_txt={lambda_rkd_ph_txt > 0} ({lambda_rkd_ph_txt}), "
-            f"sk_txt={lambda_rkd_sk_txt > 0} ({lambda_rkd_sk_txt})"
-        )
-        print(
-            "[Adapter] "
-            f"enabled={self._use_adapter}, "
-            f"image_m={self.image_adapter_m}, text_m={self.text_adapter_m}"
-        )
+        if self._distill_mode == "kd_div":
+            print(
+                "[KD-div] active branches -> "
+                f"sk_ph={lambda_rkd_sk_ph > 0} ({lambda_rkd_sk_ph}), "
+                f"ph_txt={lambda_rkd_ph_txt > 0} ({lambda_rkd_ph_txt}), "
+                f"sk_txt={lambda_rkd_sk_txt > 0} ({lambda_rkd_sk_txt})"
+            )
+        else:
+            print(
+                "[Linear InfoNCE] active branches -> "
+                f"photo={lambda_infonce_photo > 0} ({lambda_infonce_photo}), "
+                f"sketch={lambda_infonce_sketch > 0} ({lambda_infonce_sketch}), "
+                f"text={lambda_infonce_text > 0} ({lambda_infonce_text}), "
+                f"project_512_to_1024={self._project_linear_infonce}"
+            )
         self.saved_features = defaultdict(lambda: {"sketch": [], "photo": []})
 
-        # init token random
-        text_dim = clip_model_distill.positional_embedding.shape[-1]
-        num_guided_layers = len(
-            self.prompt_learner_photo.compound_prompt_projections
-        )
-        txt_guided_prompts = torch.empty(
-            num_guided_layers,
-            cfg.n_ctx,
-            text_dim
-        )
-        nn.init.normal_(txt_guided_prompts, std=0.02)
+    def project_image_distill_feature(self, feature):
+        if not self._project_linear_infonce:
+            return feature
+        return self.distill_proj(feature.type(self.dtype))
 
-        # register_buffer: không học, không gradient
-        self.register_buffer(
-            "txt_guided_prompts",
-            txt_guided_prompts
-        )
+    def project_text_distill_feature(self, feature):
+        if not self._project_linear_infonce or not hasattr(self, "text_distill_proj"):
+            return feature
+        return self.text_distill_proj(feature.type(self.dtype))
     
     def teacher_image_input(self, image):
         if not self._use_strong_teacher:
@@ -307,38 +322,15 @@ class CustomCLIP(nn.Module):
         (
             tokenized_prompts,
             prompts,
-            shared_ctx,
-            # deep_compound_prompts_text,
-            # deep_compound_prompts_vision,
+            visual_ctx,
         ) = prompt_learner(classnames)
         
         text_features = self.text_encoder(prompts, tokenized_prompts) # (n_classes, 512)
 
-        # init token random
-        txt_guided_prompts = self.txt_guided_prompts
-
-        visual_deep_prompts = []
-        for index, layer in enumerate(prompt_learner.compound_prompt_projections):
-            text_prompt = txt_guided_prompts[index]
-            text_prompt = layer(text_prompt.half())
-            # text_prompt = text_prompt.mean(dim=0)
-            visual_deep_prompts.append(text_prompt)
-
         image_features = image_encoder(
-                img_tensor.type(self.dtype), shared_ctx, visual_deep_prompts
+                img_tensor.type(self.dtype), visual_ctx, []
             ) # (batch_size, 768)
         
-        if self._use_adapter:
-            x_a = self.adapter_photo(image_features)
-            image_features = (
-                self.image_adapter_m * x_a + (1 - self.image_adapter_m) * image_features
-            )
-
-            x_b = self.adapter_text(text_features)
-            text_features = (
-                self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_features
-            )
-
         image_features_normalize = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
@@ -358,12 +350,15 @@ class CustomCLIP(nn.Module):
         )
         _, neg_feature, neg_raw_feature = self.get_logits(neg_tensor, classnames)
         
-        lambda_rkd_sk_ph = getattr(self.cfg, "lambda_rkd_sk_ph", 0.0)
-        lambda_rkd_ph_txt = getattr(self.cfg, "lambda_rkd_ph_txt", 0.0)
-        lambda_rkd_sk_txt = getattr(self.cfg, "lambda_rkd_sk_txt", 0.0)
-        
-        train_photo_distill = lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0
-        train_sketch_distill = lambda_rkd_sk_ph > 0 or lambda_rkd_sk_txt > 0
+        if self._distill_mode == "kd_div":
+            lambda_rkd_sk_ph = getattr(self.cfg, "lambda_rkd_sk_ph", 0.0)
+            lambda_rkd_ph_txt = getattr(self.cfg, "lambda_rkd_ph_txt", 0.0)
+            lambda_rkd_sk_txt = getattr(self.cfg, "lambda_rkd_sk_txt", 0.0)
+            train_photo_distill = lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0
+            train_sketch_distill = lambda_rkd_sk_ph > 0 or lambda_rkd_sk_txt > 0
+        else:
+            train_photo_distill = getattr(self.cfg, "lambda_infonce_photo", 0.0) > 0
+            train_sketch_distill = getattr(self.cfg, "lambda_infonce_sketch", 0.0) > 0
         photo_aug_features = photo_feature.detach()
         sk_aug_features = sk_feature.detach()
 
@@ -375,11 +370,11 @@ class CustomCLIP(nn.Module):
                 if train_sketch_distill:
                     teacher_input = self.teacher_image_input(sk_aug_tensor)
                     sk_aug_features = self.model_distill.encode_image(teacher_input)
-        photo_distill_feature = photo_feature
-        sk_distill_feature = sk_feature
-        neg_distill_feature = neg_raw_feature
-        photo_text_distill_feature = photo_text_feature
-        sk_text_distill_feature = sk_text_feature
+        photo_distill_feature = self.project_image_distill_feature(photo_feature)
+        sk_distill_feature = self.project_image_distill_feature(sk_feature)
+        neg_distill_feature = self.project_image_distill_feature(neg_raw_feature)
+        photo_text_distill_feature = self.project_text_distill_feature(photo_text_feature)
+        sk_text_distill_feature = self.project_text_distill_feature(sk_text_feature)
         teacher_text_feature = self.get_teacher_text_features(classnames)
             
         return photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
@@ -443,8 +438,16 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, self.model, features=features, mode='train')
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
-            show_on_bar = k.startswith('kd_')
-            bar_name = k.replace("kd_sk_ph", "KD_SP").replace("kd_ph_txt", "KD_PT").replace("kd_sk_txt", "KD_ST")
+            show_on_bar = k.startswith('kd_') or k.startswith('infonce_')
+            bar_name = (
+                k.replace("kd_sk_ph", "KD_SP")
+                .replace("kd_ph_txt", "KD_PT")
+                .replace("kd_sk_txt", "KD_ST")
+                .replace("infonce_photo_text", "I_PT")
+                .replace("infonce_sketch_text", "I_ST")
+                .replace("infonce_photo", "I_PH")
+                .replace("infonce_sketch", "I_SK")
+            )
             self.log(bar_name, v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
         return loss
     

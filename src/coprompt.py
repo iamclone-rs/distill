@@ -1,37 +1,26 @@
-import copy
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
 
 from clip import clip
-from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
-from src.utils import get_clones
-from src.data_config import UNSEEN_CLASSES
 
-_tokenizer = _Tokenizer()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class TextEncoder(nn.Module):
     def __init__(self, clip_model, args):
         super().__init__()
-        self.args = args
         self.resblocks = clip_model.transformer.resblocks
         self.positional_embedding = clip_model.positional_embedding
         self.ln_final = clip_model.ln_final
         self.text_projection = clip_model.text_projection
         self.dtype = clip_model.dtype
 
-    def forward(self, prompts, tokenized_prompts, return_all=False):
+    def forward(self, prompts, tokenized_prompts):
         x = prompts + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
         
-        txt_guided_prompts = []
         for block in self.resblocks:
             x = block(x)
-            if return_all:
-                prompt_tok = x[1:self.args.n_ctx + 1, :, :]
-                txt_guided_prompts.append(prompt_tok.permute(1, 0, 2))
             
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
@@ -43,8 +32,6 @@ class TextEncoder(nn.Module):
             @ self.text_projection
         )
 
-        if return_all:
-            return x, txt_guided_prompts
         return x
     
 class MultiModalPromptLearner(nn.Module):
@@ -61,7 +48,6 @@ class MultiModalPromptLearner(nn.Module):
         cfg_imsize = cfg.max_size
         
         self.dropout_layer = nn.Dropout(p=0.1)
-        self.compound_prompts_depth = max(1, int(getattr(cfg, "prompt_depth", 1)))
         assert (
             cfg_imsize == clip_imsize
         ), f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
@@ -82,15 +68,9 @@ class MultiModalPromptLearner(nn.Module):
         
         self.prompt_prefix = prompt_prefix
         self.proj = nn.Linear(ctx_dim, 768)
-        single_layer = nn.Linear(ctx_dim, 768)
-        num_deep_prompts = max(0, self.compound_prompts_depth - 1)
-        self.compound_prompt_projections = get_clones(
-            single_layer, num_deep_prompts
-        )
         
         if dtype == torch.float16:
             self.proj.half()
-            self.compound_prompt_projections.half()
         self.ctx = nn.Parameter(ctx_vectors)
 
         self.n_ctx = n_ctx
@@ -137,22 +117,4 @@ class MultiModalPromptLearner(nn.Module):
             tokenized_prompts,
             prompts,
             self.proj(self.ctx),
-            # self.compound_prompts_text, 
-            # visual_deep_prompts,        
-        )  # pass here original, as for visual 768 is required
-
-class Adapter(nn.Module):
-    def __init__(self, c_in, reduction=4):
-        super(Adapter, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(c_in, c_in // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(c_in // reduction, c_in, bias=False),
-            # nn.ReLU(inplace=True),
         )
-
-    def forward(self, x):
-        x = self.fc(x)
-        return x
-    
-    

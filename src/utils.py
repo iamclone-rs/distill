@@ -1,5 +1,4 @@
 import os
-import copy
 import torch
 import torch.nn as nn
 from torch import Tensor, tensor
@@ -37,9 +36,6 @@ def get_all_categories(args, mode="train"):
         all_categories = sorted(unseen_classes)
         # all_categories = sorted(list(set(all_categories)))
     return all_categories
-
-def get_clones(module, N):
-    return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
 def init_weight(m):
     if isinstance(m, nn.Linear):

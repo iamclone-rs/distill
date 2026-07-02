@@ -14,13 +14,22 @@ from src.utils import get_all_categories
 
 
 def print_run_config(args):
-    print(
-        "[KD-div Distill] weights -> "
-        f"sk_ph={getattr(args, 'lambda_rkd_sk_ph', 0.0)}, "
-        f"ph_txt={getattr(args, 'lambda_rkd_ph_txt', 0.0)}, "
-        f"sk_txt={getattr(args, 'lambda_rkd_sk_txt', 0.0)}, "
-        f"temp={getattr(args, 'rkd_temperature', 0.07)}"
-    )
+    if args.distill_mode == "linear_infonce":
+        print(
+            "[Linear InfoNCE Distill] weights -> "
+            f"photo={args.lambda_infonce_photo}, "
+            f"sketch={args.lambda_infonce_sketch}, "
+            f"text={args.lambda_infonce_text}, "
+            f"temp={args.infonce_temperature}"
+        )
+    else:
+        print(
+            "[KD-div Distill] weights -> "
+            f"sk_ph={getattr(args, 'lambda_rkd_sk_ph', 0.0)}, "
+            f"ph_txt={getattr(args, 'lambda_rkd_ph_txt', 0.0)}, "
+            f"sk_txt={getattr(args, 'lambda_rkd_sk_txt', 0.0)}, "
+            f"temp={getattr(args, 'rkd_temperature', 0.07)}"
+        )
 
     print(
         "[Loss] base weights -> "
@@ -30,9 +39,8 @@ def print_run_config(args):
     )
     print(
         "[Run] "
-        f"dataset={args.dataset}, teacher={args.teacher}, "
+        f"dataset={args.dataset}, teacher={args.teacher}, distill_mode={args.distill_mode}, "
         f"quantize_fp16={args.quantize_fp16}, "
-        f"no_adap={args.no_adap}, "
         f"teacher_ckpt={args.teacher_ckpt or 'default'}, seed={args.seed}"
     )
 
@@ -107,7 +115,7 @@ if __name__ == "__main__":
         "--prompt_depth",
         type=int,
         default=1,
-        help="Số tầng prompt. Mặc định 1 = chỉ shallow prompt, không chèn deep prompt vào các layer sau.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--use_classes", type=int, default=104)
     parser.add_argument("--data_split", type=int, default=-1)
@@ -128,11 +136,6 @@ if __name__ == "__main__":
     parser.add_argument('--test_batch_size', type=int, default=1024)
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--workers', type=int, default=2)
-    parser.add_argument('--use_adapt_sk', type=bool, default=True)
-    parser.add_argument('--use_adapt_ph', type=bool, default=True)
-    parser.add_argument('--use_adapt_txt', type=bool, default=True)
-    parser.add_argument('--no_adap', action='store_true', default=False,
-                        help='Tắt image/text adapters trong forward và freeze tham số adapter.')
     parser.add_argument('--use_co_sk', type=bool, default=True)
     parser.add_argument('--use_co_ph', type=bool, default=True)
     parser.add_argument('--progress', action='store_true', default=False,
@@ -152,6 +155,9 @@ if __name__ == "__main__":
                         help='Chạy strong teacher dfn5b ở FP16 để giảm VRAM và tăng tốc.')
     parser.add_argument('--teacher_ckpt', type=str, default='',
                         help='Đường dẫn checkpoint để load weight cho strong teacher dfn5b.')
+    parser.add_argument('--distill_mode', type=str, default='kd_div',
+                        choices=['kd_div', 'linear_infonce'],
+                        help='Chọn phương pháp distill: kd_div hoặc linear_infonce.')
     parser.add_argument('--use_rkd', action='store_true', default=False,
                         help=argparse.SUPPRESS)
     parser.add_argument('--lambda_rkd_sk_ph', type=float, default=0.0,
@@ -162,6 +168,14 @@ if __name__ == "__main__":
                         help='Trọng số KD-div cho ma trận quan hệ Sketch-Text.')
     parser.add_argument('--rkd_temperature', type=float, default=0.07,
                         help='Temperature cho KD-div similarity distribution.')
+    parser.add_argument('--lambda_infonce_photo', type=float, default=0.0,
+                        help='Trọng số linear InfoNCE giữa student photo và teacher photo.')
+    parser.add_argument('--lambda_infonce_sketch', type=float, default=0.0,
+                        help='Trọng số linear InfoNCE giữa student sketch và teacher sketch.')
+    parser.add_argument('--lambda_infonce_text', type=float, default=0.0,
+                        help='Trọng số linear InfoNCE giữa student text prompts và teacher text.')
+    parser.add_argument('--infonce_temperature', type=float, default=0.07,
+                        help='Temperature cho linear InfoNCE distillation.')
                         
     parser.add_argument('--exp_name', type=str, default='Co_prompt')
 
