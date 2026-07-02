@@ -63,6 +63,59 @@ def infonce_distill_loss(student_feat, teacher_feat, temperature=0.07):
     return F.cross_entropy(logits, targets)
 
 
+def teacher_weighted_ntxent_loss(
+    student_sketch_feat,
+    student_photo_feat,
+    teacher_sketch_feat,
+    teacher_photo_feat,
+    alpha=0.3,
+    temperature=0.08,
+):
+    """
+    NT-Xent sketch-photo với target mềm từ teacher.
+
+    alpha=0   -> chỉ dùng target cứng theo diagonal như contrastive CE.
+    alpha=1   -> hoàn toàn học phân phối similarity của teacher.
+    0<alpha<1 -> vừa giữ positive đúng sample, vừa cho teacher định hình hard negatives.
+    """
+    if (
+        student_sketch_feat is None
+        or student_photo_feat is None
+        or teacher_sketch_feat is None
+        or teacher_photo_feat is None
+    ):
+        return None
+
+    alpha = max(0.0, min(1.0, float(alpha)))
+    student_sketch_feat = F.normalize(student_sketch_feat, dim=-1)
+    student_photo_feat = F.normalize(student_photo_feat, dim=-1)
+    teacher_sketch_feat = F.normalize(
+        teacher_sketch_feat.to(device=student_sketch_feat.device, dtype=student_sketch_feat.dtype),
+        dim=-1,
+    )
+    teacher_photo_feat = F.normalize(
+        teacher_photo_feat.to(device=student_photo_feat.device, dtype=student_photo_feat.dtype),
+        dim=-1,
+    )
+
+    logits_sk_ph = student_sketch_feat @ student_photo_feat.t() / temperature
+    logits_ph_sk = logits_sk_ph.t()
+
+    with torch.no_grad():
+        teacher_logits = teacher_sketch_feat @ teacher_photo_feat.t() / temperature
+        teacher_target_sk_ph = F.softmax(teacher_logits, dim=-1)
+        teacher_target_ph_sk = F.softmax(teacher_logits.t(), dim=-1)
+
+        batch_size = student_sketch_feat.shape[0]
+        hard_target = torch.eye(batch_size, device=student_sketch_feat.device, dtype=student_sketch_feat.dtype)
+        target_sk_ph = (1.0 - alpha) * hard_target + alpha * teacher_target_sk_ph
+        target_ph_sk = (1.0 - alpha) * hard_target + alpha * teacher_target_ph_sk
+
+    loss_sk_ph = -(target_sk_ph * F.log_softmax(logits_sk_ph, dim=-1)).sum(dim=-1).mean()
+    loss_ph_sk = -(target_ph_sk * F.log_softmax(logits_ph_sk, dim=-1)).sum(dim=-1).mean()
+    return 0.5 * (loss_sk_ph + loss_ph_sk)
+
+
 def add_infonce_distill(loss_distill, loss_dict, name, weight, student_feat, teacher_feat, temperature):
     if weight <= 0 or student_feat is None or teacher_feat is None:
         return loss_distill
@@ -205,6 +258,20 @@ def loss_fn(args, model, features, mode='train'):
                 temp,
             )
             loss_distill = loss_distill + lambda_text * loss_text
+    elif distill_mode == "teacher_weighted_ntxent":
+        weight = getattr(args, "lambda_tw_ntxent", 0.0)
+        if weight > 0:
+            loss_value = teacher_weighted_ntxent_loss(
+                sk_distill_features,
+                photo_distill_features,
+                sk_aug_features,
+                photo_aug_features,
+                alpha=getattr(args, "tw_alpha", 0.3),
+                temperature=getattr(args, "tw_temperature", 0.08),
+            )
+            if loss_value is not None:
+                loss_distill = loss_distill + weight * loss_value
+                loss_dict["tw_ntxent"] = loss_value
     else:
         raise ValueError(f"Unknown distill_mode: {distill_mode}")
 

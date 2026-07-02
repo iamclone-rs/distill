@@ -22,6 +22,13 @@ def print_run_config(args):
             f"text={args.lambda_infonce_text}, "
             f"temp={args.infonce_temperature}"
         )
+    elif args.distill_mode == "teacher_weighted_ntxent":
+        print(
+            "[Teacher-Weighted NT-Xent] "
+            f"lambda={args.lambda_tw_ntxent}, "
+            f"alpha={args.tw_alpha}, "
+            f"temp={args.tw_temperature}"
+        )
     else:
         print(
             "[KD-div Distill] weights -> "
@@ -158,8 +165,8 @@ if __name__ == "__main__":
     parser.add_argument('--teacher_ckpt', type=str, default='',
                         help='Đường dẫn checkpoint để load weight cho strong teacher dfn5b.')
     parser.add_argument('--distill_mode', type=str, default='kd_div',
-                        choices=['kd_div', 'linear_infonce'],
-                        help='Chọn phương pháp distill: kd_div hoặc linear_infonce.')
+                        choices=['kd_div', 'linear_infonce', 'teacher_weighted_ntxent'],
+                        help='Chọn phương pháp distill: kd_div, linear_infonce, hoặc teacher_weighted_ntxent.')
     parser.add_argument('--use_rkd', action='store_true', default=False,
                         help=argparse.SUPPRESS)
     parser.add_argument('--lambda_rkd_sk_ph', type=float, default=0.0,
@@ -178,6 +185,12 @@ if __name__ == "__main__":
                         help='Trọng số linear InfoNCE giữa student text prompts và teacher text.')
     parser.add_argument('--infonce_temperature', type=float, default=0.07,
                         help='Temperature cho linear InfoNCE distillation.')
+    parser.add_argument('--lambda_tw_ntxent', type=float, default=0.0,
+                        help='Trọng số Teacher-Weighted NT-Xent giữa sketch-photo student theo phân phối teacher.')
+    parser.add_argument('--tw_alpha', type=float, default=0.3,
+                        help='Mức trộn teacher soft target trong Teacher-Weighted NT-Xent, 0=NT-Xent cứng, 1=theo teacher hoàn toàn.')
+    parser.add_argument('--tw_temperature', type=float, default=0.08,
+                        help='Temperature cho Teacher-Weighted NT-Xent.')
                         
     parser.add_argument('--exp_name', type=str, default='Co_prompt')
 

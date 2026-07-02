@@ -45,6 +45,8 @@ def _needs_strong_teacher(args):
             or getattr(args, "lambda_infonce_sketch", 0.0) > 0
             or getattr(args, "lambda_infonce_text", 0.0) > 0
         )
+    if distill_mode == "teacher_weighted_ntxent":
+        return getattr(args, "lambda_tw_ntxent", 0.0) > 0
     return (
         getattr(args, "lambda_rkd_sk_ph", 0.0) > 0
         or getattr(args, "lambda_rkd_ph_txt", 0.0) > 0
@@ -175,7 +177,7 @@ def _load_teacher(args):
         return None
 
     if not _needs_strong_teacher(args):
-        print(f"[Teacher] {teacher_key} được chọn nhưng KD-div weight = 0 -> bỏ qua strong teacher")
+        print(f"[Teacher] {teacher_key} được chọn nhưng distill weight = 0 -> bỏ qua strong teacher")
         return None
 
     if teacher_key not in _TEACHER_REGISTRY:
@@ -270,6 +272,7 @@ class CustomCLIP(nn.Module):
         lambda_infonce_photo = getattr(cfg, "lambda_infonce_photo", 0.0)
         lambda_infonce_sketch = getattr(cfg, "lambda_infonce_sketch", 0.0)
         lambda_infonce_text = getattr(cfg, "lambda_infonce_text", 0.0)
+        lambda_tw_ntxent = getattr(cfg, "lambda_tw_ntxent", 0.0)
 
         self._kd_image_distill_active = (
             lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
@@ -277,16 +280,18 @@ class CustomCLIP(nn.Module):
         self._infonce_image_distill_active = (
             lambda_infonce_photo > 0 or lambda_infonce_sketch > 0
         )
-        self._image_distill_active = (
-            self._kd_image_distill_active
-            if self._distill_mode == "kd_div"
-            else self._infonce_image_distill_active
-        )
-        self._need_teacher_text = (
-            (lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0)
-            if self._distill_mode == "kd_div"
-            else lambda_infonce_text > 0
-        )
+        self._tw_ntxent_active = lambda_tw_ntxent > 0
+        if self._distill_mode == "kd_div":
+            self._image_distill_active = self._kd_image_distill_active
+            self._need_teacher_text = lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
+        elif self._distill_mode == "linear_infonce":
+            self._image_distill_active = self._infonce_image_distill_active
+            self._need_teacher_text = lambda_infonce_text > 0
+        elif self._distill_mode == "teacher_weighted_ntxent":
+            self._image_distill_active = self._tw_ntxent_active
+            self._need_teacher_text = False
+        else:
+            raise ValueError(f"Unknown distill_mode: {self._distill_mode}")
         self._teacher_fp16 = (
             self._use_strong_teacher
             and getattr(cfg, "quantize_fp16", False)
@@ -307,13 +312,20 @@ class CustomCLIP(nn.Module):
                 f"ph_txt={lambda_rkd_ph_txt > 0} ({lambda_rkd_ph_txt}), "
                 f"sk_txt={lambda_rkd_sk_txt > 0} ({lambda_rkd_sk_txt})"
             )
-        else:
+        elif self._distill_mode == "linear_infonce":
             print(
                 "[Linear InfoNCE] active branches -> "
                 f"photo={lambda_infonce_photo > 0} ({lambda_infonce_photo}), "
                 f"sketch={lambda_infonce_sketch > 0} ({lambda_infonce_sketch}), "
                 f"text={lambda_infonce_text > 0} ({lambda_infonce_text}), "
                 f"project_512_to_{self._teacher_output_dim}={self._project_linear_infonce}"
+            )
+        else:
+            print(
+                "[Teacher-Weighted NT-Xent] active -> "
+                f"{self._tw_ntxent_active} ({lambda_tw_ntxent}), "
+                f"alpha={getattr(cfg, 'tw_alpha', 0.3)}, "
+                f"temp={getattr(cfg, 'tw_temperature', 0.08)}"
             )
         self.saved_features = defaultdict(lambda: {"sketch": [], "photo": []})
 
@@ -408,9 +420,14 @@ class CustomCLIP(nn.Module):
             lambda_rkd_sk_txt = getattr(self.cfg, "lambda_rkd_sk_txt", 0.0)
             train_photo_distill = lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0
             train_sketch_distill = lambda_rkd_sk_ph > 0 or lambda_rkd_sk_txt > 0
-        else:
+        elif self._distill_mode == "linear_infonce":
             train_photo_distill = getattr(self.cfg, "lambda_infonce_photo", 0.0) > 0
             train_sketch_distill = getattr(self.cfg, "lambda_infonce_sketch", 0.0) > 0
+        elif self._distill_mode == "teacher_weighted_ntxent":
+            train_photo_distill = getattr(self.cfg, "lambda_tw_ntxent", 0.0) > 0
+            train_sketch_distill = train_photo_distill
+        else:
+            raise ValueError(f"Unknown distill_mode: {self._distill_mode}")
         photo_aug_features = photo_feature.detach()
         sk_aug_features = sk_feature.detach()
 
@@ -490,7 +507,7 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, self.model, features=features, mode='train')
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
-            show_on_bar = k.startswith('kd_') or k.startswith('infonce_')
+            show_on_bar = k.startswith('kd_') or k.startswith('infonce_') or k.startswith('tw_')
             bar_name = (
                 k.replace("kd_sk_ph", "KD_SP")
                 .replace("kd_ph_txt", "KD_PT")
@@ -499,6 +516,7 @@ class ZS_SBIR(pl.LightningModule):
                 .replace("infonce_sketch_text", "I_ST")
                 .replace("infonce_photo", "I_PH")
                 .replace("infonce_sketch", "I_SK")
+                .replace("tw_ntxent", "TW_NTX")
             )
             self.log(bar_name, v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
         return loss
