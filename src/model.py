@@ -143,6 +143,22 @@ def _infer_teacher_output_dim(teacher):
     return int(text_features.shape[-1])
 
 
+def _infer_teacher_image_size(teacher):
+    visual = getattr(teacher, "visual", None)
+    if visual is None:
+        return None
+
+    for attr in ("image_size", "input_resolution"):
+        value = getattr(visual, attr, None)
+        if value is None:
+            continue
+        if isinstance(value, (tuple, list)):
+            return int(value[0])
+        return int(value)
+
+    return None
+
+
 def _load_teacher(args):
     """
     Trả về strong_teacher model (frozen) hoặc None.
@@ -182,7 +198,11 @@ def _load_teacher(args):
             teacher = teacher.half()
             print(f"[Teacher] {teacher_key} quantize_fp16=True -> teacher chạy FP16")
     teacher.output_dim = _infer_teacher_output_dim(teacher)
-    print(f"[Teacher] {teacher_key} đã sẵn sàng (frozen, output {teacher.output_dim}-dim)")
+    teacher.image_size = _infer_teacher_image_size(teacher)
+    print(
+        f"[Teacher] {teacher_key} đã sẵn sàng "
+        f"(frozen, output {teacher.output_dim}-dim, image_size={teacher.image_size or 'unknown'})"
+    )
     return teacher
 
 # ---------------------------------------------------------------------------
@@ -310,6 +330,14 @@ class CustomCLIP(nn.Module):
     def teacher_image_input(self, image):
         if not self._use_strong_teacher:
             return image
+        teacher_size = getattr(self.model_distill, "image_size", None)
+        if teacher_size is not None and tuple(image.shape[-2:]) != (teacher_size, teacher_size):
+            image = F.interpolate(
+                image.float(),
+                size=(teacher_size, teacher_size),
+                mode="bicubic",
+                align_corners=False,
+            )
         return image.half() if self._teacher_fp16 else image.float()
 
     def get_teacher_text_features(self, classnames):
