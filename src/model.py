@@ -19,9 +19,20 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Teacher loader
 # ---------------------------------------------------------------------------
 _TEACHER_REGISTRY = {
-    # key         : (open_clip model name,    pretrained tag)
-    "dfn5b"       : ("ViT-H-14-quickgelu",   "dfn5b"),
+    # key             : (open_clip model name,        pretrained tag)
+    "dfn5b"           : ("ViT-H-14-quickgelu",       "dfn5b"),
+    "dfn5b_378"       : ("ViT-H-14-378-quickgelu",   "dfn5b"),
+    "dfn2b_l"         : ("ViT-L-14-quickgelu",       "dfn2b"),
+    "laion_h"         : ("ViT-H-14",                 "laion2b_s32b_b79k"),
+    "datacomp_l"      : ("ViT-L-14",                 "datacomp_xl_s13b_b90k"),
+    "siglip_so400m"   : ("ViT-SO400M-14-SigLIP",    "webli"),
+    "siglip2_so400m"  : ("ViT-SO400M-14-SigLIP2",   "webli"),
+    "siglip_l"        : ("ViT-L-16-SigLIP-384",     "webli"),
+    "eva02_l"         : ("EVA02-L-14",               "merged2b_s4b_b131k"),
+    "eva02_l_336"     : ("EVA02-L-14-336",           "merged2b_s6b_b61k"),
+    "eva02_e"         : ("EVA02-E-14",               "laion2b_s4b_b115k"),
 }
+TEACHER_CHOICES = ["clip32", *_TEACHER_REGISTRY.keys()]
 
 
 def _needs_strong_teacher(args):
@@ -121,13 +132,24 @@ def _freeze_teacher(teacher):
     return teacher
 
 
+def _infer_teacher_output_dim(teacher):
+    tokenizer = getattr(teacher, "text_tokenizer", None)
+    if tokenizer is None:
+        return 1024
+
+    tokenized = tokenizer(["a photo of object."]).to(device)
+    with torch.no_grad():
+        text_features = teacher.encode_text(tokenized)
+    return int(text_features.shape[-1])
+
+
 def _load_teacher(args):
     """
     Trả về strong_teacher model (frozen) hoặc None.
 
     args.teacher:
         'clip32'  → None  (không dùng strong teacher)
-        'dfn5b'   → DFN5B-CLIP-H/14 (1024-dim, frozen, via open_clip)
+        key trong _TEACHER_REGISTRY → open_clip teacher frozen
 
     """
     teacher_key = getattr(args, "teacher", "clip32")
@@ -159,7 +181,8 @@ def _load_teacher(args):
         else:
             teacher = teacher.half()
             print(f"[Teacher] {teacher_key} quantize_fp16=True -> teacher chạy FP16")
-    print(f"[Teacher] {teacher_key} đã sẵn sàng (frozen, output 1024-dim)")
+    teacher.output_dim = _infer_teacher_output_dim(teacher)
+    print(f"[Teacher] {teacher_key} đã sẵn sàng (frozen, output {teacher.output_dim}-dim)")
     return teacher
 
 # ---------------------------------------------------------------------------
@@ -249,11 +272,12 @@ class CustomCLIP(nn.Module):
             and getattr(cfg, "quantize_fp16", False)
             and device.type == "cuda"
         )
+        self._teacher_output_dim = getattr(strong_teacher, "output_dim", 512)
         self._project_linear_infonce = self._distill_mode == "linear_infonce" and self._use_strong_teacher
         if self._project_linear_infonce:
-            self.distill_proj = nn.Linear(512, 1024, bias=False).to(clip_model.dtype)
+            self.distill_proj = nn.Linear(512, self._teacher_output_dim, bias=False).to(clip_model.dtype)
             if self._need_teacher_text:
-                self.text_distill_proj = nn.Linear(512, 1024, bias=False).to(clip_model.dtype)
+                self.text_distill_proj = nn.Linear(512, self._teacher_output_dim, bias=False).to(clip_model.dtype)
         if self._need_teacher_text:
             self._teacher_text_cache = {}
         if self._distill_mode == "kd_div":
@@ -269,7 +293,7 @@ class CustomCLIP(nn.Module):
                 f"photo={lambda_infonce_photo > 0} ({lambda_infonce_photo}), "
                 f"sketch={lambda_infonce_sketch > 0} ({lambda_infonce_sketch}), "
                 f"text={lambda_infonce_text > 0} ({lambda_infonce_text}), "
-                f"project_512_to_1024={self._project_linear_infonce}"
+                f"project_512_to_{self._teacher_output_dim}={self._project_linear_infonce}"
             )
         self.saved_features = defaultdict(lambda: {"sketch": [], "photo": []})
 

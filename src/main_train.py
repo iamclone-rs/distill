@@ -9,7 +9,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint 
 
 from src.sketchy_dataset import TrainDataset, ValidDataset
-from src.model import ZS_SBIR
+from src.model import TEACHER_CHOICES, ZS_SBIR
 from src.utils import get_all_categories
 
 
@@ -145,11 +145,13 @@ if __name__ == "__main__":
     parser.add_argument('--visualize', action='store_true', default=False)
     parser.add_argument('--gzs', action='store_true', default=False)
     parser.add_argument('--teacher', type=str, default='clip32',
-                        choices=['clip32', 'dfn5b'],
+                        choices=TEACHER_CHOICES,
                         help=(
                             "Teacher model cho distillation:\n"
                             "  clip32 → không dùng strong teacher\n"
-                            "  dfn5b  → DFN5B-CLIP-H/14 1024-dim (cần open-clip-torch)"
+                            "  dfn5b, dfn5b_378, dfn2b_l, laion_h, datacomp_l,\n"
+                            "  siglip_so400m, siglip2_so400m, siglip_l,\n"
+                            "  eva02_l, eva02_l_336, eva02_e"
                         ))
     parser.add_argument('--quantize_fp16', action='store_true', default=False,
                         help='Chạy strong teacher dfn5b ở FP16 để giảm VRAM và tăng tốc.')
