@@ -156,9 +156,7 @@ if __name__ == "__main__":
                         help=(
                             "Teacher model cho distillation:\n"
                             "  clip32 → không dùng strong teacher\n"
-                            "  dfn5b, dfn5b_378, dfn2b_l, laion_h, datacomp_l,\n"
-                            "  siglip_so400m, siglip2_so400m, siglip_l,\n"
-                            "  eva02_l, eva02_l_336, eva02_e"
+                            "  dfn5b, laion_h"
                         ))
     parser.add_argument('--quantize_fp16', action='store_true', default=False,
                         help='Chạy strong teacher dfn5b ở FP16 để giảm VRAM và tăng tốc.')

@@ -21,16 +21,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _TEACHER_REGISTRY = {
     # key             : (open_clip model name,        pretrained tag)
     "dfn5b"           : ("ViT-H-14-quickgelu",       "dfn5b"),
-    "dfn5b_378"       : ("ViT-H-14-378-quickgelu",   "dfn5b"),
-    "dfn2b_l"         : ("ViT-L-14-quickgelu",       "dfn2b"),
     "laion_h"         : ("ViT-H-14",                 "laion2b_s32b_b79k"),
-    "datacomp_l"      : ("ViT-L-14",                 "datacomp_xl_s13b_b90k"),
-    "siglip_so400m"   : ("ViT-SO400M-14-SigLIP",    "webli"),
-    "siglip2_so400m"  : ("ViT-SO400M-14-SigLIP2",   "webli"),
-    "siglip_l"        : ("ViT-L-16-SigLIP-384",     "webli"),
-    "eva02_l"         : ("EVA02-L-14",               "merged2b_s4b_b131k"),
-    "eva02_l_336"     : ("EVA02-L-14-336",           "merged2b_s6b_b61k"),
-    "eva02_e"         : ("EVA02-E-14",               "laion2b_s4b_b115k"),
 }
 TEACHER_CHOICES = ["clip32", *_TEACHER_REGISTRY.keys()]
 
