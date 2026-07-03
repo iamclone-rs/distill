@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from clip import clip
+from src.utils import get_clones
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -9,19 +10,25 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class TextEncoder(nn.Module):
     def __init__(self, clip_model, args):
         super().__init__()
+        self.args = args
         self.resblocks = clip_model.transformer.resblocks
         self.positional_embedding = clip_model.positional_embedding
         self.ln_final = clip_model.ln_final
         self.text_projection = clip_model.text_projection
         self.dtype = clip_model.dtype
 
-    def forward(self, prompts, tokenized_prompts):
+    def forward(self, prompts, tokenized_prompts, return_all=False):
         x = prompts + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
-        
+
+        # Thu thập prompt tokens tại mỗi layer (dùng cho deep visual injection)
+        txt_guided_prompts = []
         for block in self.resblocks:
             x = block(x)
-            
+            prompt_tok = x[1:self.args.n_ctx + 1, :, :]  # (n_ctx, N_cls, dim)
+            prompt_tok = prompt_tok.permute(1, 0, 2)      # (N_cls, n_ctx, dim)
+            txt_guided_prompts.append(prompt_tok)
+
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
 
@@ -32,6 +39,8 @@ class TextEncoder(nn.Module):
             @ self.text_projection
         )
 
+        if return_all:
+            return x, txt_guided_prompts  # txt_guided_prompts: list 12 tensors
         return x
     
 class MultiModalPromptLearner(nn.Module):
@@ -68,9 +77,19 @@ class MultiModalPromptLearner(nn.Module):
         
         self.prompt_prefix = prompt_prefix
         self.proj = nn.Linear(ctx_dim, 768)
-        
+
+        # compound_prompt_projections: 1 Linear per deep layer (prompt_depth - 1 layers)
+        # prompt_depth=1 → [] (shallow, no deep injection)
+        # prompt_depth=12 → 11 Linear layers
+        self.compound_prompts_depth = getattr(cfg, "prompt_depth", 1)
+        single_proj = nn.Linear(ctx_dim, 768)
+        self.compound_prompt_projections = get_clones(
+            single_proj, max(0, self.compound_prompts_depth - 1)
+        )
+
         if dtype == torch.float16:
             self.proj.half()
+            self.compound_prompt_projections.half()
         self.ctx = nn.Parameter(ctx_vectors)
 
         self.n_ctx = n_ctx

@@ -122,7 +122,7 @@ if __name__ == "__main__":
         "--prompt_depth",
         type=int,
         default=1,
-        help=argparse.SUPPRESS,
+        help="Số layer inject cross-modal prompt vào visual encoder: 1=shallow (default, như code gốc), 12=tất cả layer.",
     )
     parser.add_argument("--use_classes", type=int, default=104)
     parser.add_argument("--data_split", type=int, default=-1)

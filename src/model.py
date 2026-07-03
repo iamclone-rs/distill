@@ -320,6 +320,16 @@ class CustomCLIP(nn.Module):
             )
         self.saved_features = defaultdict(lambda: {"sketch": [], "photo": []})
 
+        # txt_guided_prompts buffer: dùng làm nguồn khởi tạo cho deep visual prompt injection
+        # (theo GitHub CoPrompt) — không học, không gradient
+        text_dim = clip_model_distill.positional_embedding.shape[-1]  # 512 for ViT-B/32
+        num_guided_layers = len(self.prompt_learner_photo.compound_prompt_projections)
+        _buf = torch.empty(num_guided_layers, cfg.n_ctx, text_dim)
+        nn.init.normal_(_buf, std=0.02)
+        self.register_buffer("txt_guided_prompts", _buf)
+        # prompt_depth=1  → num_guided_layers=0, buffer rỗng, không inject gì
+        # prompt_depth=12 → num_guided_layers=11, inject vào 11 layer sau
+
     def project_image_distill_feature(self, feature):
         if not self._project_linear_infonce:
             return feature
@@ -380,10 +390,18 @@ class CustomCLIP(nn.Module):
             visual_ctx,
         ) = prompt_learner(classnames)
         
-        text_features = self.text_encoder(prompts, tokenized_prompts) # (n_classes, 512)
+        text_features, _ = self.text_encoder(prompts, tokenized_prompts, return_all=True)  # (n_classes, 512)
+
+        # Xây dựng deep visual prompts từ txt_guided_prompts buffer
+        # prompt_depth=1 → compound_prompt_projections=[] → visual_deep_prompts=[] (như cũ)
+        visual_deep_prompts = []
+        for index, layer in enumerate(prompt_learner.compound_prompt_projections):
+            text_prompt = self.txt_guided_prompts[index].type(self.dtype)
+            text_prompt = layer(text_prompt)
+            visual_deep_prompts.append(text_prompt)
 
         image_features = image_encoder(
-                img_tensor.type(self.dtype), visual_ctx, []
+                img_tensor.type(self.dtype), visual_ctx, visual_deep_prompts
             ) # (batch_size, 768)
         
         image_features_normalize = image_features / image_features.norm(dim=-1, keepdim=True)
@@ -471,6 +489,41 @@ def _prompt_local_params(prompt_learner):
     return trainable, total
 
 
+def _grad_stats(module):
+    params_with_grad = 0
+    elems_with_grad = 0
+    grad_sq_sum = 0.0
+    for p in module.parameters():
+        if p.grad is None:
+            continue
+        grad = p.grad.detach().float()
+        grad_norm = grad.norm().item()
+        if grad_norm == 0.0:
+            continue
+        params_with_grad += 1
+        elems_with_grad += p.numel()
+        grad_sq_sum += grad_norm ** 2
+    return params_with_grad, elems_with_grad, grad_sq_sum ** 0.5
+
+
+def _prompt_local_grad_stats(prompt_learner):
+    params = [prompt_learner.ctx, *prompt_learner.proj.parameters()]
+    params_with_grad = 0
+    elems_with_grad = 0
+    grad_sq_sum = 0.0
+    for p in params:
+        if p.grad is None:
+            continue
+        grad = p.grad.detach().float()
+        grad_norm = grad.norm().item()
+        if grad_norm == 0.0:
+            continue
+        params_with_grad += 1
+        elems_with_grad += p.numel()
+        grad_sq_sum += grad_norm ** 2
+    return params_with_grad, elems_with_grad, grad_sq_sum ** 0.5
+
+
 def _tensor_debug(name, value):
     if value is None:
         return f"  {name:<28} None"
@@ -514,6 +567,7 @@ class ZS_SBIR(pl.LightningModule):
             strong_teacher=strong_teacher,
         )
         self._feature_debug_printed = False
+        self._grad_debug_printed = False
         self._print_model_debug_summary()
     
         self.val_step_outputs_sk = []
@@ -533,6 +587,20 @@ class ZS_SBIR(pl.LightningModule):
         print(
             f"  {name:<24} trainable={_fmt_params(trainable):>8} / "
             f"total={_fmt_params(total):>8}"
+        )
+
+    def _print_grad_row(self, name, module):
+        params_with_grad, elems_with_grad, grad_norm = _grad_stats(module)
+        print(
+            f"  {name:<24} grad_params={params_with_grad:>4} "
+            f"grad_elems={_fmt_params(elems_with_grad):>8} grad_norm={grad_norm:.4e}"
+        )
+
+    def _print_prompt_local_grad_row(self, name, prompt_learner):
+        params_with_grad, elems_with_grad, grad_norm = _prompt_local_grad_stats(prompt_learner)
+        print(
+            f"  {name:<24} grad_params={params_with_grad:>4} "
+            f"grad_elems={_fmt_params(elems_with_grad):>8} grad_norm={grad_norm:.4e}"
         )
 
     def _print_model_debug_summary(self):
@@ -633,6 +701,26 @@ class ZS_SBIR(pl.LightningModule):
             )
             self.log(bar_name, v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
         return loss
+
+    def on_after_backward(self):
+        if self._grad_debug_printed or not getattr(self.trainer, "is_global_zero", True):
+            return
+
+        print("=" * 78)
+        print("[CoPrompt Debug] First backward non-zero gradient summary")
+        self._print_grad_row("CustomCLIP", self.model)
+        self._print_prompt_local_grad_row("photo ctx+proj only", self.model.prompt_learner_photo)
+        self._print_prompt_local_grad_row("sketch ctx+proj only", self.model.prompt_learner_sketch)
+        self._print_grad_row("ph_encoder", self.model.ph_encoder)
+        self._print_grad_row("sk_encoder", self.model.sk_encoder)
+        self._print_grad_row("text_encoder", self.model.text_encoder)
+        self._print_grad_row("model_distill", self.model.model_distill)
+        if hasattr(self.model, "distill_proj"):
+            self._print_grad_row("distill_proj", self.model.distill_proj)
+        if hasattr(self.model, "text_distill_proj"):
+            self._print_grad_row("text_distill_proj", self.model.text_distill_proj)
+        print("=" * 78)
+        self._grad_debug_printed = True
     
     def validation_step(self, batch, batch_idx, dataloader_idx):
         # classnames = get_all_categories(self.args, mode="test")
