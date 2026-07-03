@@ -445,6 +445,47 @@ class CustomCLIP(nn.Module):
     def extract_feature(self, image, classname, type='photo'):
         _, feature, raw_feature = self.get_logits(image, classnames=classname, type=type)
         return feature
+
+
+def _count_params(module, trainable_only=False):
+    return sum(
+        p.numel()
+        for p in module.parameters()
+        if (p.requires_grad or not trainable_only)
+    )
+
+
+def _fmt_params(num_params):
+    if num_params >= 1_000_000:
+        return f"{num_params / 1_000_000:.2f}M"
+    if num_params >= 1_000:
+        return f"{num_params / 1_000:.1f}K"
+    return str(num_params)
+
+
+def _prompt_local_params(prompt_learner):
+    total = prompt_learner.ctx.numel()
+    trainable = prompt_learner.ctx.numel() if prompt_learner.ctx.requires_grad else 0
+    total += _count_params(prompt_learner.proj)
+    trainable += _count_params(prompt_learner.proj, trainable_only=True)
+    return trainable, total
+
+
+def _tensor_debug(name, value):
+    if value is None:
+        return f"  {name:<28} None"
+    if not torch.is_tensor(value):
+        return f"  {name:<28} {type(value).__name__}"
+
+    text = (
+        f"  {name:<28} shape={tuple(value.shape)} "
+        f"dtype={value.dtype} grad={value.requires_grad}"
+    )
+    if value.ndim >= 2 and value.shape[-1] > 1:
+        with torch.no_grad():
+            norm = value.detach().float().norm(dim=-1).mean().item()
+        text += f" mean_norm={norm:.4f}"
+    return text
             
 class ZS_SBIR(pl.LightningModule):
     def __init__(self, args, classname):
@@ -472,13 +513,65 @@ class ZS_SBIR(pl.LightningModule):
             clip_model_distill=clip_model_distill,
             strong_teacher=strong_teacher,
         )
+        self._feature_debug_printed = False
+        self._print_model_debug_summary()
     
         self.val_step_outputs_sk = []
         self.val_step_outputs_ph = []
         self.saved_features = defaultdict(lambda: {"sketch": [], "photo": []})
+
+    def _print_module_param_row(self, name, module):
+        total = _count_params(module)
+        trainable = _count_params(module, trainable_only=True)
+        print(
+            f"  {name:<24} trainable={_fmt_params(trainable):>8} / "
+            f"total={_fmt_params(total):>8}"
+        )
+
+    def _print_prompt_local_row(self, name, prompt_learner):
+        trainable, total = _prompt_local_params(prompt_learner)
+        print(
+            f"  {name:<24} trainable={_fmt_params(trainable):>8} / "
+            f"total={_fmt_params(total):>8}"
+        )
+
+    def _print_model_debug_summary(self):
+        print("=" * 78)
+        print("[CoPrompt Debug] Module parameter summary")
+        print("[CoPrompt Debug] Note: prompt_learner_* rows include its registered CLIP reference.")
+        self._print_module_param_row("CustomCLIP", self.model)
+        self._print_module_param_row("prompt_learner_photo", self.model.prompt_learner_photo)
+        self._print_module_param_row("prompt_learner_sketch", self.model.prompt_learner_sketch)
+        self._print_prompt_local_row("photo ctx+proj only", self.model.prompt_learner_photo)
+        self._print_prompt_local_row("sketch ctx+proj only", self.model.prompt_learner_sketch)
+        self._print_module_param_row("ph_encoder", self.model.ph_encoder)
+        self._print_module_param_row("sk_encoder", self.model.sk_encoder)
+        self._print_module_param_row("text_encoder", self.model.text_encoder)
+        self._print_module_param_row("model_distill", self.model.model_distill)
+        if hasattr(self.model, "distill_proj"):
+            self._print_module_param_row("distill_proj", self.model.distill_proj)
+        if hasattr(self.model, "text_distill_proj"):
+            self._print_module_param_row("text_distill_proj", self.model.text_distill_proj)
+
+        total_trainable = _count_params(self.model, trainable_only=True)
+        print(f"[CoPrompt Debug] Total trainable params: {_fmt_params(total_trainable)}")
+        print(
+            "[CoPrompt Debug] Loss weights: "
+            f"cls={getattr(self.args, 'lambda_cls', 1.0)}, "
+            f"triplet={getattr(self.args, 'lambda_triplet', 1.0)}, "
+            f"nt_xent={getattr(self.args, 'lambda_nt_xent', 1.0)}, "
+            f"distill_mode={getattr(self.args, 'distill_mode', 'kd_div')}"
+        )
+        print("=" * 78)
         
     def configure_optimizers(self):
         optimizer = torch.optim.SGD(params=self.model.parameters(), lr=self.args.lr, weight_decay=1e-3, momentum=0.9)
+        trainable = sum(p.numel() for group in optimizer.param_groups for p in group["params"] if p.requires_grad)
+        print(
+            "[CoPrompt Debug] Optimizer: SGD "
+            f"lr={self.args.lr}, momentum=0.9, weight_decay=1e-3, "
+            f"trainable_params={_fmt_params(trainable)}"
+        )
         
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer=optimizer,
@@ -494,6 +587,35 @@ class ZS_SBIR(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         classname = get_all_categories(self.args)
         features = self.forward(batch, classname)
+        if (
+            not self._feature_debug_printed
+            and batch_idx == 0
+            and getattr(self.trainer, "is_global_zero", True)
+        ):
+            feature_names = [
+                "photo_features_norm",
+                "sk_feature_norm",
+                "photo_aug_features",
+                "sk_aug_features",
+                "neg_features",
+                "label",
+                "pos_logits",
+                "sk_logits",
+                "photo_features_raw",
+                "sk_features_raw",
+                "photo_distill_features",
+                "sk_distill_features",
+                "neg_distill_features",
+                "photo_text_distill_features",
+                "sk_text_distill_features",
+                "teacher_text_features",
+            ]
+            print("=" * 78)
+            print("[CoPrompt Debug] First train batch feature contract")
+            for name, value in zip(feature_names, features):
+                print(_tensor_debug(name, value))
+            print("=" * 78)
+            self._feature_debug_printed = True
         
         loss, loss_dict = loss_fn(self.args, self.model, features=features, mode='train')
         self.log('train_loss', loss, on_step=False, on_epoch=True)
