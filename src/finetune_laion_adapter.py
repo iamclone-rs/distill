@@ -26,7 +26,9 @@ from src.eval_laion_sketchy import (
     encode_images,
     encode_text,
     make_loader,
+    parse_map_k,
     retrieval_at_k,
+    resolve_metric_config,
 )
 
 
@@ -196,7 +198,8 @@ def evaluate_split(
     feature_set,
     text_set,
     device,
-    top_k,
+    map_k,
+    precision_k,
     retrieval_chunk_size,
     description,
 ):
@@ -218,7 +221,8 @@ def evaluate_split(
             photo_features,
             photo_labels,
             device,
-            top_k=top_k,
+            map_k=map_k,
+            precision_k=precision_k,
             chunk_size=retrieval_chunk_size,
             description=description,
             show_progress=False,
@@ -281,7 +285,14 @@ def parse_args():
     parser.add_argument("--lambda_retain", type=float, default=0.1)
     parser.add_argument("--val_fraction", type=float, default=0.1)
     parser.add_argument("--warmup_fraction", type=float, default=0.05)
-    parser.add_argument("--top_k", type=int, default=200)
+    parser.add_argument("--map_k", type=parse_map_k, default="auto")
+    parser.add_argument("--precision_k", type=int, default=0, help="0 selects the dataset default.")
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=None,
+        help="Deprecated: overrides both map_k and precision_k.",
+    )
     parser.add_argument("--retrieval_chunk_size", type=int, default=256)
     parser.add_argument("--fp16_backbone", action="store_true")
     parser.add_argument("--max_train_per_class", type=int, default=None)
@@ -306,6 +317,12 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_fp16 = args.fp16_backbone and device.type == "cuda"
+    map_k, precision_k = resolve_metric_config(
+        args.dataset, args.map_k, args.precision_k, args.top_k
+    )
+    map_name = "all" if map_k is None else str(map_k)
+    map_metric_key = f"mAP@{map_name}"
+    precision_metric_key = f"P@{precision_k}_project_compatible"
 
     unseen_classes = UNSEEN_CLASSES[args.dataset]
     all_classes = get_all_classes(args.root)
@@ -315,7 +332,8 @@ def main():
         raise RuntimeError(f"Unseen class directories are missing: {missing_unseen}")
     print(
         f"Protocol: train adapter on {len(seen_classes)} seen classes; "
-        f"evaluate only on {len(unseen_classes)} unseen classes."
+        f"evaluate only on {len(unseen_classes)} unseen classes. "
+        f"Metrics: {map_metric_key}, P@{precision_k}."
     )
 
     train_samples, seen_val_samples = collect_seen_splits(
@@ -432,7 +450,8 @@ def main():
         seen_val_features,
         seen_text,
         device,
-        args.top_k,
+        map_k,
+        precision_k,
         args.retrieval_chunk_size,
         "Epoch 0 · seen validation",
     )
@@ -441,7 +460,8 @@ def main():
         unseen_features,
         unseen_text,
         device,
-        args.top_k,
+        map_k,
+        precision_k,
         args.retrieval_chunk_size,
         "Epoch 0 · unseen evaluation",
     )
@@ -456,10 +476,10 @@ def main():
     initial_unseen_retrieval = initial_unseen_metrics["sketch_to_photo"]
     print(
         f"Epoch 0/{args.epochs} | "
-        f"seen mAP@{args.top_k}={initial_seen_retrieval[f'mAP@{args.top_k}']:.4f} "
-        f"P@{args.top_k}={initial_seen_retrieval[f'P@{args.top_k}_project_compatible']:.4f} | "
-        f"unseen mAP@{args.top_k}={initial_unseen_retrieval[f'mAP@{args.top_k}']:.4f} "
-        f"P@{args.top_k}={initial_unseen_retrieval[f'P@{args.top_k}_project_compatible']:.4f} "
+        f"seen {map_metric_key}={initial_seen_retrieval[map_metric_key]:.4f} "
+        f"P@{precision_k}={initial_seen_retrieval[precision_metric_key]:.4f} | "
+        f"unseen {map_metric_key}={initial_unseen_retrieval[map_metric_key]:.4f} "
+        f"P@{precision_k}={initial_unseen_retrieval[precision_metric_key]:.4f} "
         f"sketch@1={initial_unseen_metrics['sketch_zero_shot']['top1']:.4f}"
     )
     metrics_path.write_text(json.dumps(initial_metrics) + "\n", encoding="utf-8")
@@ -481,7 +501,7 @@ def main():
         seen_classes,
         unseen_classes,
     )
-    best_seen_map = initial_seen_metrics["sketch_to_photo"][f"mAP@{args.top_k}"]
+    best_seen_map = initial_seen_metrics["sketch_to_photo"][map_metric_key]
 
     for epoch in range(1, args.epochs + 1):
         adapters.train()
@@ -544,7 +564,8 @@ def main():
             seen_val_features,
             seen_text,
             device,
-            args.top_k,
+            map_k,
+            precision_k,
             args.retrieval_chunk_size,
             f"Epoch {epoch} · seen validation",
         )
@@ -553,7 +574,8 @@ def main():
             unseen_features,
             unseen_text,
             device,
-            args.top_k,
+            map_k,
+            precision_k,
             args.retrieval_chunk_size,
             f"Epoch {epoch} · unseen evaluation",
         )
@@ -577,7 +599,7 @@ def main():
             seen_classes,
             unseen_classes,
         )
-        seen_map = seen_metrics["sketch_to_photo"][f"mAP@{args.top_k}"]
+        seen_map = seen_metrics["sketch_to_photo"][map_metric_key]
         is_best = seen_map > best_seen_map
         if seen_map > best_seen_map:
             best_seen_map = seen_map
@@ -597,10 +619,10 @@ def main():
             f"loss={train_metrics['total']:.4f} "
             f"ret={train_metrics['retrieval']:.4f} "
             f"sem={train_metrics['semantic']:.4f} | "
-            f"seen mAP@{args.top_k}={seen_retrieval[f'mAP@{args.top_k}']:.4f} "
-            f"P@{args.top_k}={seen_retrieval[f'P@{args.top_k}_project_compatible']:.4f} | "
-            f"unseen mAP@{args.top_k}={unseen_retrieval[f'mAP@{args.top_k}']:.4f} "
-            f"P@{args.top_k}={unseen_retrieval[f'P@{args.top_k}_project_compatible']:.4f} "
+            f"seen {map_metric_key}={seen_retrieval[map_metric_key]:.4f} "
+            f"P@{precision_k}={seen_retrieval[precision_metric_key]:.4f} | "
+            f"unseen {map_metric_key}={unseen_retrieval[map_metric_key]:.4f} "
+            f"P@{precision_k}={unseen_retrieval[precision_metric_key]:.4f} "
             f"sketch@1={unseen_metrics['sketch_zero_shot']['top1']:.4f}"
             f"{' *' if is_best else ''}"
         )

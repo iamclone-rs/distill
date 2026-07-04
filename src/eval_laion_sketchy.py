@@ -17,6 +17,12 @@ from src.data_config import UNSEEN_CLASSES
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+DATASET_METRICS = {
+    "sketchy_1": {"map_k": None, "precision_k": 100},
+    "sketchy_2": {"map_k": 200, "precision_k": 200},
+    "quickdraw": {"map_k": None, "precision_k": 200},
+    "tuberlin": {"map_k": None, "precision_k": 100},
+}
 
 
 class FolderDataset(Dataset):
@@ -113,15 +119,30 @@ def retrieval_at_k(
     gallery_features,
     gallery_labels,
     device,
-    top_k=200,
+    map_k=200,
+    precision_k=None,
     chunk_size=256,
     description="Sketch→photo retrieval",
     show_progress=True,
+    top_k=None,
 ):
-    """Category-level mAP@K and P@K with sketch queries and photo gallery."""
+    """Category-level mAP@K (or all) and P@K for sketch-to-photo retrieval."""
+    if top_k is not None:  # Backward compatibility with older calls.
+        map_k = top_k
+        precision_k = top_k
+    if precision_k is None:
+        precision_k = map_k if map_k is not None else 100
+    if map_k is not None and map_k <= 0:
+        raise ValueError("map_k must be positive or None for mAP@all")
+    if precision_k <= 0:
+        raise ValueError("precision_k must be positive")
+
     gallery_features = gallery_features.to(device)
     gallery_labels = gallery_labels.to(device)
-    actual_k = min(top_k, len(gallery_features))
+    gallery_size = len(gallery_features)
+    map_rank = gallery_size if map_k is None else min(map_k, gallery_size)
+    precision_rank = min(precision_k, gallery_size)
+    ranking_size = max(map_rank, precision_rank)
     ap_values = []
     standard_precision_values = []
     project_precision_values = []
@@ -137,31 +158,70 @@ def retrieval_at_k(
         queries = query_features[start:start + chunk_size].to(device)
         labels = query_labels[start:start + chunk_size].to(device)
         similarities = queries @ gallery_features.t()
-        indices = similarities.topk(actual_k, dim=-1).indices
+        indices = similarities.topk(ranking_size, dim=-1).indices
         relevant = gallery_labels[indices].eq(labels[:, None])
 
-        cumulative_hits = relevant.cumsum(dim=-1)
-        ranks = torch.arange(1, actual_k + 1, device=device, dtype=torch.float32)
-        precision_at_rank = cumulative_hits / ranks
+        relevant_for_map = relevant[:, :map_rank]
+        map_ranks = torch.arange(1, map_rank + 1, device=device, dtype=torch.float32)
+        precision_at_rank = relevant_for_map.cumsum(dim=-1) / map_ranks
         relevant_total = gallery_labels[None, :].eq(labels[:, None]).sum(dim=-1)
-        denominator = relevant_total.clamp(max=actual_k).clamp(min=1)
-        average_precision = (precision_at_rank * relevant).sum(dim=-1) / denominator
-        project_rank_mask = ranks[None, :] <= denominator[:, None]
+        map_denominator = (
+            relevant_total
+            if map_k is None
+            else relevant_total.clamp(max=map_rank)
+        ).clamp(min=1)
+        average_precision = (
+            precision_at_rank * relevant_for_map
+        ).sum(dim=-1) / map_denominator
+
+        relevant_for_precision = relevant[:, :precision_rank]
+        project_denominator = relevant_total.clamp(max=precision_rank).clamp(min=1)
+        precision_ranks = torch.arange(
+            1, precision_rank + 1, device=device, dtype=torch.float32
+        )
+        project_rank_mask = precision_ranks[None, :] <= project_denominator[:, None]
         project_precision = (
-            (relevant & project_rank_mask).sum(dim=-1) / denominator
+            (relevant_for_precision & project_rank_mask).sum(dim=-1)
+            / project_denominator
         )
 
         ap_values.append(average_precision.cpu())
-        standard_precision_values.append(relevant.float().mean(dim=-1).cpu())
+        standard_precision_values.append(
+            relevant_for_precision.float().mean(dim=-1).cpu()
+        )
         project_precision_values.append(project_precision.cpu())
 
+    map_name = "all" if map_k is None else str(map_k)
     return {
-        f"mAP@{top_k}": torch.cat(ap_values).mean().item(),
-        f"P@{top_k}_standard": torch.cat(standard_precision_values).mean().item(),
-        f"P@{top_k}_project_compatible": torch.cat(project_precision_values).mean().item(),
+        f"mAP@{map_name}": torch.cat(ap_values).mean().item(),
+        f"P@{precision_k}_standard": torch.cat(standard_precision_values).mean().item(),
+        f"P@{precision_k}_project_compatible": torch.cat(project_precision_values).mean().item(),
         "queries": len(query_features),
         "gallery": len(gallery_features),
     }
+
+
+def parse_map_k(value):
+    value = str(value).lower()
+    if value in {"auto", "all"}:
+        return value
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("map_k must be 'auto', 'all', or a positive integer")
+    return parsed
+
+
+def resolve_metric_config(dataset, map_k="auto", precision_k=0, top_k=None):
+    if top_k is not None:
+        return top_k, top_k
+    defaults = DATASET_METRICS[dataset]
+    resolved_map_k = defaults["map_k"] if map_k == "auto" else map_k
+    if resolved_map_k == "all":
+        resolved_map_k = None
+    resolved_precision_k = defaults["precision_k"] if precision_k == 0 else precision_k
+    if resolved_precision_k <= 0:
+        raise ValueError("precision_k must be positive or 0 for auto")
+    return resolved_map_k, resolved_precision_k
 
 
 def parse_args():
@@ -173,7 +233,14 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--retrieval_chunk_size", type=int, default=256)
-    parser.add_argument("--top_k", type=int, default=200)
+    parser.add_argument("--map_k", type=parse_map_k, default="auto")
+    parser.add_argument("--precision_k", type=int, default=0, help="0 selects the dataset default.")
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=None,
+        help="Deprecated: overrides both map_k and precision_k.",
+    )
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument(
         "--max_per_class",
@@ -188,6 +255,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    map_k, precision_k = resolve_metric_config(
+        args.dataset, args.map_k, args.precision_k, args.top_k
+    )
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -284,7 +354,8 @@ def main():
             photo_features,
             photo_labels,
             device,
-            top_k=args.top_k,
+            map_k=map_k,
+            precision_k=precision_k,
             chunk_size=args.retrieval_chunk_size,
         ),
     }
