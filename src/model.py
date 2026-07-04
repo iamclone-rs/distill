@@ -13,6 +13,7 @@ from src.coprompt import MultiModalPromptLearner, TextEncoder
 from src.utils import load_clip_to_cpu, get_all_categories, retrieval_precision, visualize_tsne
 from src.losses import loss_fn
 from src.data_config import VISUALIZE_CLASSES, UNSEEN_CLASSES
+from src.finetune_laion_adapter import ModalityAdapters
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -131,6 +132,58 @@ def _freeze_teacher(teacher):
     for p in teacher.parameters():
         p.requires_grad = False
     return teacher
+
+
+def _load_teacher_adapters(args, strong_teacher):
+    ckpt_path = getattr(args, "teacher_adapter_ckpt", "")
+    if not ckpt_path:
+        return None
+    if strong_teacher is None:
+        raise ValueError("--teacher_adapter_ckpt requires a strong teacher, not teacher=clip32.")
+
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    required = {"adapter_state_dict", "feature_dim", "bottleneck_dim"}
+    missing = required - set(checkpoint)
+    if missing:
+        raise RuntimeError(
+            f"Invalid teacher adapter checkpoint '{ckpt_path}'; missing keys: {sorted(missing)}"
+        )
+
+    teacher_key = getattr(args, "teacher", "")
+    if teacher_key in _TEACHER_REGISTRY:
+        expected_model, expected_pretrained = _TEACHER_REGISTRY[teacher_key]
+        saved_model = checkpoint.get("model")
+        saved_pretrained = checkpoint.get("pretrained")
+        if saved_model and saved_model != expected_model:
+            raise RuntimeError(
+                f"Adapter model mismatch: checkpoint={saved_model}, teacher={expected_model}"
+            )
+        if saved_pretrained and saved_pretrained != expected_pretrained:
+            raise RuntimeError(
+                "Adapter pretrained-weight mismatch: "
+                f"checkpoint={saved_pretrained}, teacher={expected_pretrained}"
+            )
+
+    feature_dim = int(checkpoint["feature_dim"])
+    teacher_dim = int(getattr(strong_teacher, "output_dim", feature_dim))
+    if feature_dim != teacher_dim:
+        raise RuntimeError(
+            f"Adapter feature_dim={feature_dim} does not match teacher output_dim={teacher_dim}."
+        )
+
+    adapters = ModalityAdapters(
+        feature_dim=feature_dim,
+        bottleneck_dim=int(checkpoint["bottleneck_dim"]),
+    )
+    adapters.load_state_dict(checkpoint["adapter_state_dict"], strict=True)
+    adapters.eval().requires_grad_(False)
+    adapters = adapters.to(device=device, dtype=torch.float32)
+    print(
+        f"[Teacher Adapter] loaded {ckpt_path} "
+        f"(epoch={checkpoint.get('epoch', 'unknown')}, feature_dim={feature_dim}, "
+        f"bottleneck={checkpoint['bottleneck_dim']})"
+    )
+    return adapters
 
 
 def _infer_teacher_output_dim(teacher):
@@ -263,6 +316,7 @@ class CustomCLIP(nn.Module):
         else:
             self.model_distill = clip_model_distill
             self._use_strong_teacher = False
+        self.teacher_adapters = _load_teacher_adapters(cfg, strong_teacher)
         
         self._distill_mode = getattr(cfg, "distill_mode", "kd_div")
         lambda_rkd_sk_ph = getattr(cfg, "lambda_rkd_sk_ph", 0.0)
@@ -375,6 +429,17 @@ class CustomCLIP(nn.Module):
             )
         return image.half() if self._teacher_fp16 else image.float()
 
+    def adapt_teacher_feature(self, feature, modality):
+        if self.teacher_adapters is None:
+            return feature
+        feature = F.normalize(feature.float(), dim=-1)
+        adapter = (
+            self.teacher_adapters.photo
+            if modality == "photo"
+            else self.teacher_adapters.sketch
+        )
+        return adapter(feature)
+
     def get_teacher_text_features(self, classnames):
         if not self._need_teacher_text:
             return None
@@ -478,9 +543,15 @@ class CustomCLIP(nn.Module):
                 if train_photo_distill:
                     teacher_input = self.teacher_image_input(photo_aug_tensor)
                     photo_aug_features = self.model_distill.encode_image(teacher_input)
+                    photo_aug_features = self.adapt_teacher_feature(
+                        photo_aug_features, "photo"
+                    )
                 if train_sketch_distill:
                     teacher_input = self.teacher_image_input(sk_aug_tensor)
                     sk_aug_features = self.model_distill.encode_image(teacher_input)
+                    sk_aug_features = self.adapt_teacher_feature(
+                        sk_aug_features, "sketch"
+                    )
         photo_distill_feature = self.project_image_distill_feature(photo_feature)
         sk_distill_feature = self.project_image_distill_feature(sk_feature)
         neg_distill_feature = self.project_image_distill_feature(neg_raw_feature)

@@ -56,7 +56,8 @@ def print_run_config(args):
         "[Run] "
         f"dataset={args.dataset}, teacher={args.teacher}, distill_mode={args.distill_mode}, "
         f"quantize_fp16={args.quantize_fp16}, "
-        f"teacher_ckpt={args.teacher_ckpt or 'default'}, seed={args.seed}"
+        f"teacher_ckpt={args.teacher_ckpt or 'default'}, "
+        f"teacher_adapter={args.teacher_adapter_ckpt or 'none'}, seed={args.seed}"
     )
 
 
@@ -170,6 +171,8 @@ if __name__ == "__main__":
                         help='Chạy strong teacher dfn5b ở FP16 để giảm VRAM và tăng tốc.')
     parser.add_argument('--teacher_ckpt', type=str, default='',
                         help='Đường dẫn checkpoint để load weight cho strong teacher dfn5b.')
+    parser.add_argument('--teacher_adapter_ckpt', type=str, default='',
+                        help='Checkpoint modality adapter đã fine-tune cho strong teacher.')
     parser.add_argument('--distill_mode', type=str, default='kd_div',
                         choices=['kd_div', 'linear_infonce', 'teacher_weighted_ntxent', 'independent_cosine'],
                         help='Chọn phương pháp distill: kd_div, linear_infonce, teacher_weighted_ntxent, hoặc independent_cosine.')
