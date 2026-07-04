@@ -123,7 +123,8 @@ def retrieval_at_k(
     gallery_labels = gallery_labels.to(device)
     actual_k = min(top_k, len(gallery_features))
     ap_values = []
-    precision_values = []
+    standard_precision_values = []
+    project_precision_values = []
 
     for start in range(0, len(query_features), chunk_size):
         queries = query_features[start:start + chunk_size].to(device)
@@ -138,16 +139,22 @@ def retrieval_at_k(
         relevant_total = gallery_labels[None, :].eq(labels[:, None]).sum(dim=-1)
         denominator = relevant_total.clamp(max=actual_k).clamp(min=1)
         average_precision = (precision_at_rank * relevant).sum(dim=-1) / denominator
+        project_rank_mask = ranks[None, :] <= denominator[:, None]
+        project_precision = (
+            (relevant & project_rank_mask).sum(dim=-1) / denominator
+        )
 
         ap_values.append(average_precision.cpu())
-        precision_values.append(relevant.float().mean(dim=-1).cpu())
+        standard_precision_values.append(relevant.float().mean(dim=-1).cpu())
+        project_precision_values.append(project_precision.cpu())
 
         completed = min(start + chunk_size, len(query_features))
         print(f"  ranked {completed}/{len(query_features)} sketches", flush=True)
 
     return {
         f"mAP@{top_k}": torch.cat(ap_values).mean().item(),
-        f"P@{top_k}": torch.cat(precision_values).mean().item(),
+        f"P@{top_k}_standard": torch.cat(standard_precision_values).mean().item(),
+        f"P@{top_k}_project_compatible": torch.cat(project_precision_values).mean().item(),
         "queries": len(query_features),
         "gallery": len(gallery_features),
     }
