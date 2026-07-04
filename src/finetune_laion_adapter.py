@@ -221,6 +221,7 @@ def evaluate_split(
             top_k=top_k,
             chunk_size=retrieval_chunk_size,
             description=description,
+            show_progress=False,
         ),
     }
     if device.type == "cuda":
@@ -451,7 +452,16 @@ def main():
         "seen_validation": initial_seen_metrics,
         "unseen_evaluation": initial_unseen_metrics,
     }
-    print(json.dumps(initial_metrics, indent=2))
+    initial_seen_retrieval = initial_seen_metrics["sketch_to_photo"]
+    initial_unseen_retrieval = initial_unseen_metrics["sketch_to_photo"]
+    print(
+        f"Epoch 0/{args.epochs} | "
+        f"seen mAP@{args.top_k}={initial_seen_retrieval[f'mAP@{args.top_k}']:.4f} "
+        f"P@{args.top_k}={initial_seen_retrieval[f'P@{args.top_k}_project_compatible']:.4f} | "
+        f"unseen mAP@{args.top_k}={initial_unseen_retrieval[f'mAP@{args.top_k}']:.4f} "
+        f"P@{args.top_k}={initial_unseen_retrieval[f'P@{args.top_k}_project_compatible']:.4f} "
+        f"sketch@1={initial_unseen_metrics['sketch_zero_shot']['top1']:.4f}"
+    )
     metrics_path.write_text(json.dumps(initial_metrics) + "\n", encoding="utf-8")
     save_checkpoint(
         output_dir / "initial.pt",
@@ -555,7 +565,6 @@ def main():
             "seen_validation": seen_metrics,
             "unseen_evaluation": unseen_metrics,
         }
-        print(json.dumps(epoch_metrics, indent=2))
         with metrics_path.open("a", encoding="utf-8") as file:
             file.write(json.dumps(epoch_metrics) + "\n")
 
@@ -569,6 +578,7 @@ def main():
             unseen_classes,
         )
         seen_map = seen_metrics["sketch_to_photo"][f"mAP@{args.top_k}"]
+        is_best = seen_map > best_seen_map
         if seen_map > best_seen_map:
             best_seen_map = seen_map
             save_checkpoint(
@@ -580,7 +590,20 @@ def main():
                 seen_classes,
                 unseen_classes,
             )
-            print(f"New best held-out seen mAP@{args.top_k}: {best_seen_map:.6f}")
+        seen_retrieval = seen_metrics["sketch_to_photo"]
+        unseen_retrieval = unseen_metrics["sketch_to_photo"]
+        print(
+            f"Epoch {epoch}/{args.epochs} | "
+            f"loss={train_metrics['total']:.4f} "
+            f"ret={train_metrics['retrieval']:.4f} "
+            f"sem={train_metrics['semantic']:.4f} | "
+            f"seen mAP@{args.top_k}={seen_retrieval[f'mAP@{args.top_k}']:.4f} "
+            f"P@{args.top_k}={seen_retrieval[f'P@{args.top_k}_project_compatible']:.4f} | "
+            f"unseen mAP@{args.top_k}={unseen_retrieval[f'mAP@{args.top_k}']:.4f} "
+            f"P@{args.top_k}={unseen_retrieval[f'P@{args.top_k}_project_compatible']:.4f} "
+            f"sketch@1={unseen_metrics['sketch_zero_shot']['top1']:.4f}"
+            f"{' *' if is_best else ''}"
+        )
 
     print(f"Training complete. Metrics and checkpoints: {output_dir}")
 

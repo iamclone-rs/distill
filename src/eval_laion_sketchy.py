@@ -116,6 +116,7 @@ def retrieval_at_k(
     top_k=200,
     chunk_size=256,
     description="Sketch→photo retrieval",
+    show_progress=True,
 ):
     """Category-level mAP@K and P@K with sketch queries and photo gallery."""
     gallery_features = gallery_features.to(device)
@@ -126,7 +127,13 @@ def retrieval_at_k(
     project_precision_values = []
 
     starts = range(0, len(query_features), chunk_size)
-    for start in tqdm(starts, desc=description, unit="chunk", leave=False):
+    for start in tqdm(
+        starts,
+        desc=description,
+        unit="chunk",
+        leave=False,
+        disable=not show_progress,
+    ):
         queries = query_features[start:start + chunk_size].to(device)
         labels = query_labels[start:start + chunk_size].to(device)
         similarities = queries @ gallery_features.t()
