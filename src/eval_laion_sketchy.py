@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
+from tqdm.auto import tqdm
 
 from src.data_config import UNSEEN_CLASSES
 
@@ -63,20 +64,17 @@ def make_loader(dataset, batch_size, workers):
 
 
 @torch.inference_mode()
-def encode_images(model, loader, device, use_fp16):
+def encode_images(model, loader, device, use_fp16, description="Encoding"):
     all_features = []
     all_labels = []
 
-    for batch_index, (images, labels) in enumerate(loader, start=1):
+    for images, labels in tqdm(loader, desc=description, unit="batch", leave=False):
         images = images.to(device, non_blocking=True)
         if use_fp16:
             images = images.half()
         features = F.normalize(model.encode_image(images), dim=-1)
         all_features.append(features.float().cpu())
         all_labels.append(labels.long())
-
-        if batch_index % 20 == 0 or batch_index == len(loader):
-            print(f"  encoded {batch_index}/{len(loader)} batches", flush=True)
 
     return torch.cat(all_features), torch.cat(all_labels)
 
@@ -117,6 +115,7 @@ def retrieval_at_k(
     device,
     top_k=200,
     chunk_size=256,
+    description="Sketch→photo retrieval",
 ):
     """Category-level mAP@K and P@K with sketch queries and photo gallery."""
     gallery_features = gallery_features.to(device)
@@ -126,7 +125,8 @@ def retrieval_at_k(
     standard_precision_values = []
     project_precision_values = []
 
-    for start in range(0, len(query_features), chunk_size):
+    starts = range(0, len(query_features), chunk_size)
+    for start in tqdm(starts, desc=description, unit="chunk", leave=False):
         queries = query_features[start:start + chunk_size].to(device)
         labels = query_labels[start:start + chunk_size].to(device)
         similarities = queries @ gallery_features.t()
@@ -147,9 +147,6 @@ def retrieval_at_k(
         ap_values.append(average_precision.cpu())
         standard_precision_values.append(relevant.float().mean(dim=-1).cpu())
         project_precision_values.append(project_precision.cpu())
-
-        completed = min(start + chunk_size, len(query_features))
-        print(f"  ranked {completed}/{len(query_features)} sketches", flush=True)
 
     return {
         f"mAP@{top_k}": torch.cat(ap_values).mean().item(),

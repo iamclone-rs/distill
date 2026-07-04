@@ -17,6 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
+from tqdm.auto import tqdm
 
 from src.data_config import UNSEEN_CLASSES
 from src.eval_laion_sketchy import (
@@ -190,7 +191,15 @@ def adapt_features(adapter, features, device, batch_size=4096):
     return torch.cat(outputs)
 
 
-def evaluate_split(adapters, feature_set, text_set, device, top_k, retrieval_chunk_size):
+def evaluate_split(
+    adapters,
+    feature_set,
+    text_set,
+    device,
+    top_k,
+    retrieval_chunk_size,
+    description,
+):
     sketch_features = adapt_features(adapters.sketch, feature_set["sketch"][0], device)
     photo_features = adapt_features(adapters.photo, feature_set["photo"][0], device)
     sketch_labels = feature_set["sketch"][1]
@@ -211,6 +220,7 @@ def evaluate_split(adapters, feature_set, text_set, device, top_k, retrieval_chu
             device,
             top_k=top_k,
             chunk_size=retrieval_chunk_size,
+            description=description,
         ),
     }
     if device.type == "cuda":
@@ -345,6 +355,7 @@ def main():
                 ),
                 device,
                 use_fp16,
+                description=f"Encode {name}/{modality}",
             )
         return result
 
@@ -415,7 +426,6 @@ def main():
     metrics_path.write_text("", encoding="utf-8")
     global_step = 0
 
-    print("Evaluating epoch 0 identity adapters on held-out seen images...")
     initial_seen_metrics = evaluate_split(
         adapters,
         seen_val_features,
@@ -423,8 +433,8 @@ def main():
         device,
         args.top_k,
         args.retrieval_chunk_size,
+        "Epoch 0 · seen validation",
     )
-    print("Evaluating epoch 0 identity adapters on unseen classes...")
     initial_unseen_metrics = evaluate_split(
         adapters,
         unseen_features,
@@ -432,6 +442,7 @@ def main():
         device,
         args.top_k,
         args.retrieval_chunk_size,
+        "Epoch 0 · unseen evaluation",
     )
     initial_metrics = {
         "epoch": 0,
@@ -466,7 +477,12 @@ def main():
         adapters.train()
         totals = {"total": 0.0, "retrieval": 0.0, "semantic": 0.0, "retain": 0.0}
 
-        for batch_index, (base_sketch, base_photo, labels) in enumerate(train_loader, start=1):
+        progress = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch}/{args.epochs} · train",
+            unit="batch",
+        )
+        for base_sketch, base_photo, labels in progress:
             base_sketch = F.normalize(
                 base_sketch.to(device, non_blocking=True).float(), dim=-1
             )
@@ -507,15 +523,12 @@ def main():
             totals["retrieval"] += loss_retrieval.item()
             totals["semantic"] += loss_semantic.item()
             totals["retain"] += loss_retain.item()
-            if batch_index % 100 == 0 or batch_index == len(train_loader):
-                print(
-                    f"Epoch {epoch}/{args.epochs} batch {batch_index}/{len(train_loader)} "
-                    f"loss={loss.item():.4f} lr={optimizer.param_groups[0]['lr']:.2e}",
-                    flush=True,
-                )
+            progress.set_postfix(
+                loss=f"{loss.item():.4f}",
+                lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+            )
 
         train_metrics = {key: value / len(train_loader) for key, value in totals.items()}
-        print(f"Evaluating epoch {epoch} on held-out seen images...")
         seen_metrics = evaluate_split(
             adapters,
             seen_val_features,
@@ -523,8 +536,8 @@ def main():
             device,
             args.top_k,
             args.retrieval_chunk_size,
+            f"Epoch {epoch} · seen validation",
         )
-        print(f"Evaluating epoch {epoch} on unseen classes (report only)...")
         unseen_metrics = evaluate_split(
             adapters,
             unseen_features,
@@ -532,6 +545,7 @@ def main():
             device,
             args.top_k,
             args.retrieval_chunk_size,
+            f"Epoch {epoch} · unseen evaluation",
         )
 
         epoch_metrics = {
