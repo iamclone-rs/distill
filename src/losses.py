@@ -63,6 +63,24 @@ def infonce_distill_loss(student_feat, teacher_feat, temperature=0.07):
     return F.cross_entropy(logits, targets)
 
 
+def independent_cosine_distill_loss(student_feat, teacher_feat):
+    """Cosine feature alignment theo từng phần tử, không dùng negatives hay quan hệ toàn batch."""
+    teacher_feat = teacher_feat.to(dtype=student_feat.dtype, device=student_feat.device)
+    student_feat = F.normalize(student_feat, dim=-1)
+    teacher_feat = F.normalize(teacher_feat, dim=-1)
+    return (1.0 - (student_feat * teacher_feat).sum(dim=-1)).mean()
+
+
+def add_independent_cosine(loss_distill, loss_dict, name, weight, student_feat, teacher_feat):
+    if weight <= 0 or student_feat is None or teacher_feat is None:
+        return loss_distill
+
+    loss_value = independent_cosine_distill_loss(student_feat, teacher_feat)
+    loss_distill = loss_distill + weight * loss_value
+    loss_dict[name] = loss_value
+    return loss_distill
+
+
 def teacher_weighted_ntxent_loss(
     student_sketch_feat,
     student_photo_feat,
@@ -272,6 +290,39 @@ def loss_fn(args, model, features, mode='train'):
             if loss_value is not None:
                 loss_distill = loss_distill + weight * loss_value
                 loss_dict["tw_ntxent"] = loss_value
+    elif distill_mode == "independent_cosine":
+        loss_distill = add_independent_cosine(
+            loss_distill,
+            loss_dict,
+            "ind_photo",
+            getattr(args, "lambda_ind_photo", 0.0),
+            photo_distill_features,
+            photo_aug_features,
+        )
+        loss_distill = add_independent_cosine(
+            loss_distill,
+            loss_dict,
+            "ind_sketch",
+            getattr(args, "lambda_ind_sketch", 0.0),
+            sk_distill_features,
+            sk_aug_features,
+        )
+        loss_distill = add_independent_cosine(
+            loss_distill,
+            loss_dict,
+            "ind_sketch_photo",
+            getattr(args, "lambda_ind_sketch_photo", 0.0),
+            sk_distill_features,
+            photo_aug_features,
+        )
+        loss_distill = add_independent_cosine(
+            loss_distill,
+            loss_dict,
+            "ind_text",
+            getattr(args, "lambda_ind_text", 0.0),
+            0.5 * (photo_text_distill_features + sk_text_distill_features),
+            teacher_text_features,
+        )
     else:
         raise ValueError(f"Unknown distill_mode: {distill_mode}")
 
@@ -280,11 +331,13 @@ def loss_fn(args, model, features, mode='train'):
             distance_function=distance_fn, margin=0.2)
     loss_triplet = triplet(sk_feature_norm, photo_features_norm, neg_features)
     
-    nt_xent_loss = nt_xent(photo_features, sk_features)
-
     lambda_cls = getattr(args, "lambda_cls", 1.0)
     lambda_triplet = getattr(args, "lambda_triplet", 1.0)
     lambda_nt_xent = getattr(args, "lambda_nt_xent", 1.0)
+    if lambda_nt_xent > 0:
+        nt_xent_loss = nt_xent(photo_features, sk_features)
+    else:
+        nt_xent_loss = torch.tensor(0.0, device=pos_logits.device)
     
     total_loss = (
         lambda_cls * loss_cls \

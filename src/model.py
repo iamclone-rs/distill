@@ -7,6 +7,7 @@ from torch.nn import functional as F
 from collections import defaultdict
 from torchmetrics.functional import retrieval_average_precision #, retrieval_precision
 import open_clip
+from clip import clip
 
 from src.coprompt import MultiModalPromptLearner, TextEncoder
 from src.utils import load_clip_to_cpu, get_all_categories, retrieval_precision, visualize_tsne
@@ -38,6 +39,13 @@ def _needs_strong_teacher(args):
         )
     if distill_mode == "teacher_weighted_ntxent":
         return getattr(args, "lambda_tw_ntxent", 0.0) > 0
+    if distill_mode == "independent_cosine":
+        return (
+            getattr(args, "lambda_ind_photo", 0.0) > 0
+            or getattr(args, "lambda_ind_sketch", 0.0) > 0
+            or getattr(args, "lambda_ind_sketch_photo", 0.0) > 0
+            or getattr(args, "lambda_ind_text", 0.0) > 0
+        )
     return (
         getattr(args, "lambda_rkd_sk_ph", 0.0) > 0
         or getattr(args, "lambda_rkd_ph_txt", 0.0) > 0
@@ -264,6 +272,10 @@ class CustomCLIP(nn.Module):
         lambda_infonce_sketch = getattr(cfg, "lambda_infonce_sketch", 0.0)
         lambda_infonce_text = getattr(cfg, "lambda_infonce_text", 0.0)
         lambda_tw_ntxent = getattr(cfg, "lambda_tw_ntxent", 0.0)
+        lambda_ind_photo = getattr(cfg, "lambda_ind_photo", 0.0)
+        lambda_ind_sketch = getattr(cfg, "lambda_ind_sketch", 0.0)
+        lambda_ind_sketch_photo = getattr(cfg, "lambda_ind_sketch_photo", 0.0)
+        lambda_ind_text = getattr(cfg, "lambda_ind_text", 0.0)
 
         self._kd_image_distill_active = (
             lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
@@ -272,6 +284,11 @@ class CustomCLIP(nn.Module):
             lambda_infonce_photo > 0 or lambda_infonce_sketch > 0
         )
         self._tw_ntxent_active = lambda_tw_ntxent > 0
+        self._independent_image_distill_active = (
+            lambda_ind_photo > 0
+            or lambda_ind_sketch > 0
+            or lambda_ind_sketch_photo > 0
+        )
         if self._distill_mode == "kd_div":
             self._image_distill_active = self._kd_image_distill_active
             self._need_teacher_text = lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
@@ -281,6 +298,9 @@ class CustomCLIP(nn.Module):
         elif self._distill_mode == "teacher_weighted_ntxent":
             self._image_distill_active = self._tw_ntxent_active
             self._need_teacher_text = False
+        elif self._distill_mode == "independent_cosine":
+            self._image_distill_active = self._independent_image_distill_active
+            self._need_teacher_text = lambda_ind_text > 0
         else:
             raise ValueError(f"Unknown distill_mode: {self._distill_mode}")
         self._teacher_fp16 = (
@@ -289,8 +309,11 @@ class CustomCLIP(nn.Module):
             and device.type == "cuda"
         )
         self._teacher_output_dim = getattr(strong_teacher, "output_dim", 512)
-        self._project_linear_infonce = self._distill_mode == "linear_infonce" and self._use_strong_teacher
-        if self._project_linear_infonce:
+        self._project_to_teacher_dim = (
+            self._distill_mode in ("linear_infonce", "independent_cosine")
+            and self._use_strong_teacher
+        )
+        if self._project_to_teacher_dim:
             self.distill_proj = nn.Linear(512, self._teacher_output_dim, bias=False).to(clip_model.dtype)
             if self._need_teacher_text:
                 self.text_distill_proj = nn.Linear(512, self._teacher_output_dim, bias=False).to(clip_model.dtype)
@@ -309,34 +332,33 @@ class CustomCLIP(nn.Module):
                 f"photo={lambda_infonce_photo > 0} ({lambda_infonce_photo}), "
                 f"sketch={lambda_infonce_sketch > 0} ({lambda_infonce_sketch}), "
                 f"text={lambda_infonce_text > 0} ({lambda_infonce_text}), "
-                f"project_512_to_{self._teacher_output_dim}={self._project_linear_infonce}"
+                f"project_512_to_{self._teacher_output_dim}={self._project_to_teacher_dim}"
             )
-        else:
+        elif self._distill_mode == "teacher_weighted_ntxent":
             print(
                 "[Teacher-Weighted NT-Xent] active -> "
                 f"{self._tw_ntxent_active} ({lambda_tw_ntxent}), "
                 f"alpha={getattr(cfg, 'tw_alpha', 0.3)}, "
                 f"temp={getattr(cfg, 'tw_temperature', 0.08)}"
             )
+        else:
+            print(
+                "[Independent Cosine] active branches -> "
+                f"photo={lambda_ind_photo > 0} ({lambda_ind_photo}), "
+                f"sketch={lambda_ind_sketch > 0} ({lambda_ind_sketch}), "
+                f"sketch_photo={lambda_ind_sketch_photo > 0} ({lambda_ind_sketch_photo}), "
+                f"text={lambda_ind_text > 0} ({lambda_ind_text}), "
+                f"project_512_to_{self._teacher_output_dim}={self._project_to_teacher_dim}"
+            )
         self.saved_features = defaultdict(lambda: {"sketch": [], "photo": []})
 
-        # txt_guided_prompts buffer: dùng làm nguồn khởi tạo cho deep visual prompt injection
-        # (theo GitHub CoPrompt) — không học, không gradient
-        text_dim = clip_model_distill.positional_embedding.shape[-1]  # 512 for ViT-B/32
-        num_guided_layers = len(self.prompt_learner_photo.compound_prompt_projections)
-        _buf = torch.empty(num_guided_layers, cfg.n_ctx, text_dim)
-        nn.init.normal_(_buf, std=0.02)
-        self.register_buffer("txt_guided_prompts", _buf)
-        # prompt_depth=1  → num_guided_layers=0, buffer rỗng, không inject gì
-        # prompt_depth=12 → num_guided_layers=11, inject vào 11 layer sau
-
     def project_image_distill_feature(self, feature):
-        if not self._project_linear_infonce:
+        if not self._project_to_teacher_dim:
             return feature
         return self.distill_proj(feature.type(self.dtype))
 
     def project_text_distill_feature(self, feature):
-        if not self._project_linear_infonce or not hasattr(self, "text_distill_proj"):
+        if not self._project_to_teacher_dim or not hasattr(self, "text_distill_proj"):
             return feature
         return self.text_distill_proj(feature.type(self.dtype))
     
@@ -354,22 +376,24 @@ class CustomCLIP(nn.Module):
         return image.half() if self._teacher_fp16 else image.float()
 
     def get_teacher_text_features(self, classnames):
-        if not self._need_teacher_text or not self._use_strong_teacher:
+        if not self._need_teacher_text:
             return None
 
         cache_key = tuple(classnames)
         if cache_key in self._teacher_text_cache:
             return self._teacher_text_cache[cache_key]
 
-        tokenizer = getattr(self.model_distill, "text_tokenizer", None)
-        if tokenizer is None:
-            return None
-
         prompts = [
             "a photo/sketch of " + name.replace("_", " ") + "."
             for name in classnames
         ]
-        tokenized = tokenizer(prompts).to(device)
+        if self._use_strong_teacher:
+            tokenizer = getattr(self.model_distill, "text_tokenizer", None)
+            if tokenizer is None:
+                return None
+            tokenized = tokenizer(prompts).to(device)
+        else:
+            tokenized = clip.tokenize(prompts).to(device)
         with torch.no_grad():
             text_features = self.model_distill.encode_text(tokenized)
         self._teacher_text_cache[cache_key] = text_features
@@ -390,14 +414,17 @@ class CustomCLIP(nn.Module):
             visual_ctx,
         ) = prompt_learner(classnames)
         
-        text_features, _ = self.text_encoder(prompts, tokenized_prompts, return_all=True)  # (n_classes, 512)
+        text_features, txt_guided_prompts = self.text_encoder(
+            prompts, tokenized_prompts, return_all=True
+        )  # text_features: (n_classes, 512)
 
-        # Xây dựng deep visual prompts từ txt_guided_prompts buffer
+        # Dùng hidden context tokens của từng text block để dẫn dắt visual block kế tiếp.
+        # Trung bình qua các class để thu được prompt dùng chung có shape (n_ctx, 768).
         # prompt_depth=1 → compound_prompt_projections=[] → visual_deep_prompts=[] (như cũ)
         visual_deep_prompts = []
         for index, layer in enumerate(prompt_learner.compound_prompt_projections):
-            text_prompt = self.txt_guided_prompts[index].type(self.dtype)
-            text_prompt = layer(text_prompt)
+            text_prompt = txt_guided_prompts[index]
+            text_prompt = layer(text_prompt).mean(dim=0)
             visual_deep_prompts.append(text_prompt)
 
         image_features = image_encoder(
@@ -435,6 +462,12 @@ class CustomCLIP(nn.Module):
         elif self._distill_mode == "teacher_weighted_ntxent":
             train_photo_distill = getattr(self.cfg, "lambda_tw_ntxent", 0.0) > 0
             train_sketch_distill = train_photo_distill
+        elif self._distill_mode == "independent_cosine":
+            train_photo_distill = (
+                getattr(self.cfg, "lambda_ind_photo", 0.0) > 0
+                or getattr(self.cfg, "lambda_ind_sketch_photo", 0.0) > 0
+            )
+            train_sketch_distill = getattr(self.cfg, "lambda_ind_sketch", 0.0) > 0
         else:
             raise ValueError(f"Unknown distill_mode: {self._distill_mode}")
         photo_aug_features = photo_feature.detach()
@@ -688,7 +721,12 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, self.model, features=features, mode='train')
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
-            show_on_bar = k.startswith('kd_') or k.startswith('infonce_') or k.startswith('tw_')
+            show_on_bar = (
+                k.startswith('kd_')
+                or k.startswith('infonce_')
+                or k.startswith('tw_')
+                or k.startswith('ind_')
+            )
             bar_name = (
                 k.replace("kd_sk_ph", "KD_SP")
                 .replace("kd_ph_txt", "KD_PT")
@@ -698,6 +736,10 @@ class ZS_SBIR(pl.LightningModule):
                 .replace("infonce_photo", "I_PH")
                 .replace("infonce_sketch", "I_SK")
                 .replace("tw_ntxent", "TW_NTX")
+                .replace("ind_photo", "IND_PH")
+                .replace("ind_sketch_photo", "IND_SP")
+                .replace("ind_sketch", "IND_SK")
+                .replace("ind_text", "IND_TXT")
             )
             self.log(bar_name, v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
         return loss

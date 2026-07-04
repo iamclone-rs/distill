@@ -14,7 +14,15 @@ from src.utils import get_all_categories
 
 
 def print_run_config(args):
-    if args.distill_mode == "linear_infonce":
+    if args.distill_mode == "independent_cosine":
+        print(
+            "[Independent Cosine Distill] weights -> "
+            f"photo={args.lambda_ind_photo}, "
+            f"sketch={args.lambda_ind_sketch}, "
+            f"sketch_photo={args.lambda_ind_sketch_photo}, "
+            f"text={args.lambda_ind_text}"
+        )
+    elif args.distill_mode == "linear_infonce":
         print(
             "[Linear InfoNCE Distill] weights -> "
             f"photo={args.lambda_infonce_photo}, "
@@ -163,8 +171,8 @@ if __name__ == "__main__":
     parser.add_argument('--teacher_ckpt', type=str, default='',
                         help='Đường dẫn checkpoint để load weight cho strong teacher dfn5b.')
     parser.add_argument('--distill_mode', type=str, default='kd_div',
-                        choices=['kd_div', 'linear_infonce', 'teacher_weighted_ntxent'],
-                        help='Chọn phương pháp distill: kd_div, linear_infonce, hoặc teacher_weighted_ntxent.')
+                        choices=['kd_div', 'linear_infonce', 'teacher_weighted_ntxent', 'independent_cosine'],
+                        help='Chọn phương pháp distill: kd_div, linear_infonce, teacher_weighted_ntxent, hoặc independent_cosine.')
     parser.add_argument('--use_rkd', action='store_true', default=False,
                         help=argparse.SUPPRESS)
     parser.add_argument('--lambda_rkd_sk_ph', type=float, default=0.0,
@@ -189,6 +197,14 @@ if __name__ == "__main__":
                         help='Mức trộn teacher soft target trong Teacher-Weighted NT-Xent, 0=NT-Xent cứng, 1=theo teacher hoàn toàn.')
     parser.add_argument('--tw_temperature', type=float, default=0.08,
                         help='Temperature cho Teacher-Weighted NT-Xent.')
+    parser.add_argument('--lambda_ind_photo', type=float, default=0.0,
+                        help='Trọng số cosine distill độc lập: student photo -> teacher photo.')
+    parser.add_argument('--lambda_ind_sketch', type=float, default=0.0,
+                        help='Trọng số cosine distill độc lập: student sketch -> teacher sketch.')
+    parser.add_argument('--lambda_ind_sketch_photo', type=float, default=0.0,
+                        help='Trọng số cosine distill độc lập: student sketch -> teacher positive photo.')
+    parser.add_argument('--lambda_ind_text', type=float, default=0.0,
+                        help='Trọng số cosine distill độc lập: student text prompt -> teacher text.')
                         
     parser.add_argument('--exp_name', type=str, default='Co_prompt')
 
