@@ -1,7 +1,7 @@
-"""Lightweight modality-adapter fine-tuning for an OpenCLIP teacher on SBIR data.
+"""Lightweight modality-adapter fine-tuning for an OpenCLIP teacher on Sketchy.
 
-This follows the repository protocol: train on all seen classes, validate on
-unseen classes after every epoch, and select the best checkpoint by unseen mAP.
+The adapter is trained only on seen classes. Unseen classes are evaluated after
+every epoch, but are never used for optimization or best-checkpoint selection.
 """
 
 import argparse
@@ -108,20 +108,28 @@ def limit_paths(paths, limit, rng):
     return sorted(rng.sample(paths, limit))
 
 
-def collect_seen(root, classnames, seed, max_train_per_class=None):
+def collect_seen_splits(root, classnames, val_fraction, seed, max_train_per_class=None):
     root = Path(root)
     rng = random.Random(seed)
     train = {"sketch": [], "photo": []}
+    val = {"sketch": [], "photo": []}
 
     for label, classname in enumerate(classnames):
         for modality in ("sketch", "photo"):
             paths = list_images(root / modality / classname)
-            if not paths:
-                raise RuntimeError(f"No {modality} files found for seen class '{classname}'")
-            train_paths = limit_paths(paths, max_train_per_class, rng)
+            if len(paths) < 2:
+                raise RuntimeError(
+                    f"Need at least two {modality} files for class '{classname}', found {len(paths)}"
+                )
+            rng.shuffle(paths)
+            val_count = max(1, int(round(len(paths) * val_fraction)))
+            val_count = min(val_count, len(paths) - 1)
+            val_paths = sorted(paths[:val_count])
+            train_paths = limit_paths(sorted(paths[val_count:]), max_train_per_class, rng)
             train[modality].extend((path, label) for path in train_paths)
+            val[modality].extend((path, label) for path in val_paths)
 
-    return train
+    return train, val
 
 
 def collect_unseen(root, classnames, max_eval_per_class=None, seed=42):
@@ -275,12 +283,7 @@ def parse_args():
     parser.add_argument("--lambda_retrieval", type=float, default=1.0)
     parser.add_argument("--lambda_semantic", type=float, default=0.5)
     parser.add_argument("--lambda_retain", type=float, default=0.1)
-    parser.add_argument(
-        "--val_fraction",
-        type=float,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
+    parser.add_argument("--val_fraction", type=float, default=0.1)
     parser.add_argument("--warmup_fraction", type=float, default=0.05)
     parser.add_argument("--map_k", type=parse_map_k, default="auto")
     parser.add_argument("--precision_k", type=int, default=0, help="0 selects the dataset default.")
@@ -301,6 +304,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if not 0 < args.val_fraction < 1:
+        raise ValueError("--val_fraction must be between 0 and 1")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -326,14 +331,15 @@ def main():
     if missing_unseen:
         raise RuntimeError(f"Unseen class directories are missing: {missing_unseen}")
     print(
-        f"Protocol: train on all {len(seen_classes)} seen classes; "
-        f"validate on {len(unseen_classes)} unseen classes. "
+        f"Protocol: train adapter on {len(seen_classes)} seen classes; "
+        f"evaluate only on {len(unseen_classes)} unseen classes. "
         f"Metrics: {map_metric_key}, P@{precision_k}."
     )
 
-    train_samples = collect_seen(
+    train_samples, seen_val_samples = collect_seen_splits(
         args.root,
         seen_classes,
+        args.val_fraction,
         args.seed,
         max_train_per_class=args.max_train_per_class,
     )
@@ -373,7 +379,8 @@ def main():
         return result
 
     train_features = encode_sample_group("seen_train", train_samples)
-    unseen_features = encode_sample_group("unseen_validation", unseen_samples)
+    seen_val_features = encode_sample_group("seen_val", seen_val_samples)
+    unseen_features = encode_sample_group("unseen_eval", unseen_samples)
 
     seen_text = {
         "sketch": encode_text(
@@ -399,7 +406,7 @@ def main():
         torch.cuda.empty_cache()
 
     # FP16 storage halves CPU memory; adapter batches are converted back to FP32.
-    for feature_group in (train_features, unseen_features):
+    for feature_group in (train_features, seen_val_features, unseen_features):
         for modality in ("sketch", "photo"):
             feature_group[modality] = (
                 feature_group[modality][0].half(),
@@ -438,6 +445,16 @@ def main():
     metrics_path.write_text("", encoding="utf-8")
     global_step = 0
 
+    initial_seen_metrics = evaluate_split(
+        adapters,
+        seen_val_features,
+        seen_text,
+        device,
+        map_k,
+        precision_k,
+        args.retrieval_chunk_size,
+        "Epoch 0 · seen validation",
+    )
     initial_unseen_metrics = evaluate_split(
         adapters,
         unseen_features,
@@ -452,12 +469,16 @@ def main():
         "epoch": 0,
         "global_step": 0,
         "train": None,
-        "unseen_validation": initial_unseen_metrics,
+        "seen_validation": initial_seen_metrics,
+        "unseen_evaluation": initial_unseen_metrics,
     }
+    initial_seen_retrieval = initial_seen_metrics["sketch_to_photo"]
     initial_unseen_retrieval = initial_unseen_metrics["sketch_to_photo"]
     print(
         f"Epoch 0/{args.epochs} | "
-        f"val {map_metric_key}={initial_unseen_retrieval[map_metric_key]:.4f} "
+        f"seen {map_metric_key}={initial_seen_retrieval[map_metric_key]:.4f} "
+        f"P@{precision_k}={initial_seen_retrieval[precision_metric_key]:.4f} | "
+        f"unseen {map_metric_key}={initial_unseen_retrieval[map_metric_key]:.4f} "
         f"P@{precision_k}={initial_unseen_retrieval[precision_metric_key]:.4f} "
         f"sketch@1={initial_unseen_metrics['sketch_zero_shot']['top1']:.4f}"
     )
@@ -472,7 +493,7 @@ def main():
         unseen_classes,
     )
     save_checkpoint(
-        output_dir / "best.pt",
+        output_dir / "best_seen.pt",
         adapters,
         args,
         0,
@@ -480,7 +501,7 @@ def main():
         seen_classes,
         unseen_classes,
     )
-    best_map = initial_unseen_metrics["sketch_to_photo"][map_metric_key]
+    best_seen_map = initial_seen_metrics["sketch_to_photo"][map_metric_key]
 
     for epoch in range(1, args.epochs + 1):
         adapters.train()
@@ -538,6 +559,16 @@ def main():
             )
 
         train_metrics = {key: value / len(train_loader) for key, value in totals.items()}
+        seen_metrics = evaluate_split(
+            adapters,
+            seen_val_features,
+            seen_text,
+            device,
+            map_k,
+            precision_k,
+            args.retrieval_chunk_size,
+            f"Epoch {epoch} · seen validation",
+        )
         unseen_metrics = evaluate_split(
             adapters,
             unseen_features,
@@ -553,7 +584,8 @@ def main():
             "epoch": epoch,
             "global_step": global_step,
             "train": train_metrics,
-            "unseen_validation": unseen_metrics,
+            "seen_validation": seen_metrics,
+            "unseen_evaluation": unseen_metrics,
         }
         with metrics_path.open("a", encoding="utf-8") as file:
             file.write(json.dumps(epoch_metrics) + "\n")
@@ -567,12 +599,12 @@ def main():
             seen_classes,
             unseen_classes,
         )
-        current_map = unseen_metrics["sketch_to_photo"][map_metric_key]
-        is_best = current_map > best_map
-        if is_best:
-            best_map = current_map
+        seen_map = seen_metrics["sketch_to_photo"][map_metric_key]
+        is_best = seen_map > best_seen_map
+        if seen_map > best_seen_map:
+            best_seen_map = seen_map
             save_checkpoint(
-                output_dir / "best.pt",
+                output_dir / "best_seen.pt",
                 adapters,
                 args,
                 epoch,
@@ -580,13 +612,16 @@ def main():
                 seen_classes,
                 unseen_classes,
             )
+        seen_retrieval = seen_metrics["sketch_to_photo"]
         unseen_retrieval = unseen_metrics["sketch_to_photo"]
         print(
             f"Epoch {epoch}/{args.epochs} | "
             f"loss={train_metrics['total']:.4f} "
             f"ret={train_metrics['retrieval']:.4f} "
             f"sem={train_metrics['semantic']:.4f} | "
-            f"val {map_metric_key}={unseen_retrieval[map_metric_key]:.4f} "
+            f"seen {map_metric_key}={seen_retrieval[map_metric_key]:.4f} "
+            f"P@{precision_k}={seen_retrieval[precision_metric_key]:.4f} | "
+            f"unseen {map_metric_key}={unseen_retrieval[map_metric_key]:.4f} "
             f"P@{precision_k}={unseen_retrieval[precision_metric_key]:.4f} "
             f"sketch@1={unseen_metrics['sketch_zero_shot']['top1']:.4f}"
             f"{' *' if is_best else ''}"
