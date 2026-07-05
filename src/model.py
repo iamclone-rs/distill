@@ -31,6 +31,8 @@ TEACHER_CHOICES = ["clip32", *_TEACHER_REGISTRY.keys()]
 def _needs_strong_teacher(args):
     if getattr(args, "teacher", "clip32") == "clip32":
         return False
+    if getattr(args, "lambda_adapter_rank", 0.0) > 0:
+        return True
     distill_mode = getattr(args, "distill_mode", "kd_div")
     if distill_mode == "linear_infonce":
         return (
@@ -376,6 +378,7 @@ class CustomCLIP(nn.Module):
         lambda_ind_sketch = getattr(cfg, "lambda_ind_sketch", 0.0)
         lambda_ind_sketch_photo = getattr(cfg, "lambda_ind_sketch_photo", 0.0)
         lambda_ind_text = getattr(cfg, "lambda_ind_text", 0.0)
+        lambda_adapter_rank = getattr(cfg, "lambda_adapter_rank", 0.0)
 
         self._kd_image_distill_active = (
             lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
@@ -403,6 +406,15 @@ class CustomCLIP(nn.Module):
             self._need_teacher_text = lambda_ind_text > 0
         else:
             raise ValueError(f"Unknown distill_mode: {self._distill_mode}")
+        self._adapter_rank_active = lambda_adapter_rank > 0
+        if self._adapter_rank_active and self.teacher_adapters is None:
+            raise ValueError(
+                "--lambda_adapter_rank requires --teacher_adapter_ckpt so the "
+                "base and adapted teacher relations can be compared."
+            )
+        self._image_distill_active = (
+            self._image_distill_active or self._adapter_rank_active
+        )
         self._teacher_fp16 = (
             self._use_strong_teacher
             and getattr(cfg, "quantize_fp16", False)
@@ -449,6 +461,12 @@ class CustomCLIP(nn.Module):
                 f"sketch_photo={lambda_ind_sketch_photo > 0} ({lambda_ind_sketch_photo}), "
                 f"text={lambda_ind_text > 0} ({lambda_ind_text}), "
                 f"project_512_to_{self._teacher_output_dim}={self._project_to_teacher_dim}"
+            )
+        if self._adapter_rank_active:
+            print(
+                "[Adapter Rank Distill] active -> "
+                f"lambda={lambda_adapter_rank}, "
+                f"margin={getattr(cfg, 'adapter_rank_margin', 0.2)}"
             )
         self.saved_features = defaultdict(lambda: {"sketch": [], "photo": []})
 
@@ -581,20 +599,33 @@ class CustomCLIP(nn.Module):
             train_sketch_distill = getattr(self.cfg, "lambda_ind_sketch", 0.0) > 0
         else:
             raise ValueError(f"Unknown distill_mode: {self._distill_mode}")
+        if self._adapter_rank_active:
+            train_photo_distill = True
+            train_sketch_distill = True
         photo_aug_features = photo_feature.detach()
         sk_aug_features = sk_feature.detach()
+        photo_teacher_base = None
+        sketch_teacher_base = None
 
         if self._image_distill_active:
             with torch.no_grad():
                 if train_photo_distill:
                     teacher_input = self.teacher_image_input(photo_aug_tensor)
                     photo_aug_features = self.model_distill.encode_image(teacher_input)
+                    if self._adapter_rank_active:
+                        photo_teacher_base = F.normalize(
+                            photo_aug_features.float(), dim=-1
+                        )
                     photo_aug_features = self.adapt_teacher_feature(
                         photo_aug_features, "photo"
                     )
                 if train_sketch_distill:
                     teacher_input = self.teacher_image_input(sk_aug_tensor)
                     sk_aug_features = self.model_distill.encode_image(teacher_input)
+                    if self._adapter_rank_active:
+                        sketch_teacher_base = F.normalize(
+                            sk_aug_features.float(), dim=-1
+                        )
                     sk_aug_features = self.adapt_teacher_feature(
                         sk_aug_features, "sketch"
                     )
@@ -608,7 +639,8 @@ class CustomCLIP(nn.Module):
         return photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
             neg_feature, label, pos_logits, sk_logits, photo_feature, sk_feature, \
             photo_distill_feature, sk_distill_feature, neg_distill_feature, \
-            photo_text_distill_feature, sk_text_distill_feature, teacher_text_feature
+            photo_text_distill_feature, sk_text_distill_feature, teacher_text_feature, \
+            photo_teacher_base, sketch_teacher_base
         
     def extract_feature(self, image, classname, type='photo'):
         _, feature, raw_feature = self.get_logits(image, classnames=classname, type=type)
@@ -833,6 +865,8 @@ class ZS_SBIR(pl.LightningModule):
                 "photo_text_distill_features",
                 "sk_text_distill_features",
                 "teacher_text_features",
+                "photo_teacher_base",
+                "sketch_teacher_base",
             ]
             print("=" * 78)
             print("[CoPrompt Debug] First train batch feature contract")
@@ -849,6 +883,7 @@ class ZS_SBIR(pl.LightningModule):
                 or k.startswith('infonce_')
                 or k.startswith('tw_')
                 or k.startswith('ind_')
+                or k.startswith('rank_')
             )
             bar_name = (
                 k.replace("kd_sk_ph", "KD_SP")
@@ -863,6 +898,7 @@ class ZS_SBIR(pl.LightningModule):
                 .replace("ind_sketch_photo", "IND_SP")
                 .replace("ind_sketch", "IND_SK")
                 .replace("ind_text", "IND_TXT")
+                .replace("rank_adapter", "RANK_ADP")
             )
             self.log(bar_name, v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
         return loss

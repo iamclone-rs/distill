@@ -52,6 +52,77 @@ def add_kd_div(loss_distill, loss_dict, name, weight, student_feat1, student_fea
     return loss_distill
 
 
+def adapter_guided_ranking_loss(
+    student_sketch,
+    student_photo,
+    teacher_sketch_adapted,
+    teacher_photo_adapted,
+    teacher_sketch_base,
+    teacher_photo_base,
+    labels,
+    temperature=0.07,
+    margin=0.2,
+):
+    """Rank positives above adapter-improved, teacher-hard negatives."""
+    device = student_sketch.device
+    student_sketch = F.normalize(student_sketch.float(), dim=-1)
+    student_photo = F.normalize(
+        student_photo.to(device=device, dtype=torch.float32), dim=-1
+    )
+    labels = labels.to(device)
+
+    sim_student = student_sketch @ student_photo.t()
+    positive_mask = labels[:, None].eq(labels[None, :])
+    negative_mask = ~positive_mask
+    pair_mask = positive_mask[:, :, None] & negative_mask[:, None, :]
+
+    with torch.no_grad():
+        teacher_sketch_adapted = F.normalize(
+            teacher_sketch_adapted.to(device=device, dtype=torch.float32), dim=-1
+        )
+        teacher_photo_adapted = F.normalize(
+            teacher_photo_adapted.to(device=device, dtype=torch.float32), dim=-1
+        )
+        teacher_sketch_base = F.normalize(
+            teacher_sketch_base.to(device=device, dtype=torch.float32), dim=-1
+        )
+        teacher_photo_base = F.normalize(
+            teacher_photo_base.to(device=device, dtype=torch.float32), dim=-1
+        )
+
+        sim_adapted = teacher_sketch_adapted @ teacher_photo_adapted.t()
+        sim_base = teacher_sketch_base @ teacher_photo_base.t()
+
+        margin_adapted = sim_adapted[:, :, None] - sim_adapted[:, None, :]
+        margin_base = sim_base[:, :, None] - sim_base[:, None, :]
+        adapter_gain = (margin_adapted - margin_base).clamp_min(0.0)
+
+        negative_logits = (sim_adapted / temperature).masked_fill(
+            ~negative_mask, -1e9
+        )
+        hard_negative_weight = F.softmax(negative_logits, dim=-1)
+        hard_negative_weight = hard_negative_weight * negative_mask.float()
+        hard_negative_weight = hard_negative_weight / hard_negative_weight.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(1e-12)
+        pair_weight = (
+            adapter_gain
+            * hard_negative_weight[:, None, :]
+            * pair_mask.float()
+        )
+        weight_sum = pair_weight.sum(dim=(1, 2))
+        valid_query = weight_sum > 1e-12
+        pair_weight = pair_weight / weight_sum[:, None, None].clamp_min(1e-12)
+
+    student_pair_loss = F.softplus(
+        margin + sim_student[:, None, :] - sim_student[:, :, None]
+    )
+    query_loss = (pair_weight * student_pair_loss).sum(dim=(1, 2))
+    if valid_query.any():
+        return query_loss[valid_query].mean()
+    return sim_student.sum() * 0.0
+
+
 def infonce_distill_loss(student_feat, teacher_feat, temperature=0.07):
     teacher_feat = teacher_feat.to(dtype=student_feat.dtype, device=student_feat.device)
     student_feat = F.normalize(student_feat, dim=1)
@@ -202,6 +273,12 @@ def loss_fn(args, model, features, mode='train'):
         sk_text_distill_features = None
         teacher_text_features = None
 
+    if len(features) >= 18:
+        photo_teacher_base, sketch_teacher_base = features[16:18]
+    else:
+        photo_teacher_base = None
+        sketch_teacher_base = None
+
     label = label.to(pos_logits.device)
     loss_ce_photo = F.cross_entropy(pos_logits, label)
     loss_ce_sk = F.cross_entropy(sk_logits, label)
@@ -336,6 +413,32 @@ def loss_fn(args, model, features, mode='train'):
         )
     else:
         raise ValueError(f"Unknown distill_mode: {distill_mode}")
+
+    lambda_adapter_rank = getattr(args, "lambda_adapter_rank", 0.0)
+    if lambda_adapter_rank > 0:
+        required = (
+            photo_aug_features,
+            sk_aug_features,
+            photo_teacher_base,
+            sketch_teacher_base,
+        )
+        if any(value is None for value in required):
+            raise RuntimeError(
+                "Adapter ranking requires adapted and base teacher image features."
+            )
+        rank_loss = adapter_guided_ranking_loss(
+            sk_features,
+            photo_features,
+            sk_aug_features,
+            photo_aug_features,
+            sketch_teacher_base,
+            photo_teacher_base,
+            label,
+            temperature=getattr(args, "rkd_temperature", 0.07),
+            margin=getattr(args, "adapter_rank_margin", 0.2),
+        )
+        loss_distill = loss_distill + lambda_adapter_rank * rank_loss
+        loss_dict["rank_adapter"] = rank_loss
 
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(

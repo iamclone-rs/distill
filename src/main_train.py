@@ -53,6 +53,11 @@ def print_run_config(args):
         f"nt_xent={args.lambda_nt_xent}"
     )
     print(
+        "[Adapter Rank Distill] "
+        f"lambda={args.lambda_adapter_rank}, "
+        f"margin={args.adapter_rank_margin}"
+    )
+    print(
         "[Run] "
         f"dataset={args.dataset}, teacher={args.teacher}, distill_mode={args.distill_mode}, "
         f"quantize_fp16={args.quantize_fp16}, "
@@ -189,6 +194,10 @@ if __name__ == "__main__":
                         help='Trọng số KD-div cho ma trận quan hệ Sketch-Text.')
     parser.add_argument('--rkd_temperature', type=float, default=0.07,
                         help='Temperature cho KD-div similarity distribution.')
+    parser.add_argument('--lambda_adapter_rank', type=float, default=0.0,
+                        help='Trọng số ranking distill trên các cặp được teacher adapter cải thiện.')
+    parser.add_argument('--adapter_rank_margin', type=float, default=0.2,
+                        help='Margin cho adapter-guided positive-negative ranking loss.')
     parser.add_argument('--lambda_infonce_photo', type=float, default=0.0,
                         help='Trọng số linear InfoNCE giữa student photo và teacher photo.')
     parser.add_argument('--lambda_infonce_sketch', type=float, default=0.0,
