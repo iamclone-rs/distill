@@ -41,6 +41,7 @@ def print_run_config(args):
         print(
             "[KD-div Distill] weights -> "
             f"sk_ph={getattr(args, 'lambda_rkd_sk_ph', 0.0)}, "
+            f"ph_sk={getattr(args, 'lambda_rkd_ph_sk', 0.0)}, "
             f"ph_txt={getattr(args, 'lambda_rkd_ph_txt', 0.0)}, "
             f"sk_txt={getattr(args, 'lambda_rkd_sk_txt', 0.0)}, "
             f"temp={getattr(args, 'rkd_temperature', 0.07)}"
@@ -183,6 +184,8 @@ if __name__ == "__main__":
                         help=argparse.SUPPRESS)
     parser.add_argument('--lambda_rkd_sk_ph', type=float, default=0.0,
                         help='Trọng số KD-div cho ma trận quan hệ Sketch-Photo.')
+    parser.add_argument('--lambda_rkd_ph_sk', type=float, default=0.0,
+                        help='Trọng số KD-div cho ma trận quan hệ Photo-Sketch.')
     parser.add_argument('--lambda_rkd_ph_txt', type=float, default=0.0,
                         help='Trọng số KD-div cho ma trận quan hệ Photo-Text.')
     parser.add_argument('--lambda_rkd_sk_txt', type=float, default=0.0,

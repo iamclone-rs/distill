@@ -226,6 +226,17 @@ def loss_fn(args, model, features, mode='train'):
         loss_distill = add_kd_div(
             loss_distill,
             loss_dict,
+            "kd_ph_sk",
+            getattr(args, "lambda_rkd_ph_sk", 0.0),
+            photo_distill_features,
+            sk_distill_features,
+            photo_aug_features,
+            sk_aug_features,
+            temp,
+        )
+        loss_distill = add_kd_div(
+            loss_distill,
+            loss_dict,
             "kd_ph_txt",
             getattr(args, "lambda_rkd_ph_txt", 0.0),
             photo_distill_features,
