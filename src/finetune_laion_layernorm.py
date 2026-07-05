@@ -234,9 +234,8 @@ def parse_args():
     parser.add_argument("--model", default="ViT-H-14")
     parser.add_argument("--pretrained", default="laion2b_s32b_b79k")
     parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--eval_batch_size", type=int, default=64)
-    parser.add_argument("--grad_accumulation", type=int, default=4)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--weight_decay", type=float, default=0.0)
@@ -265,8 +264,6 @@ def main():
     args = parse_args()
     if args.batch_size < 2:
         raise ValueError("--batch_size must be at least 2 for cross-modal retrieval loss")
-    if args.grad_accumulation < 1:
-        raise ValueError("--grad_accumulation must be positive")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -369,10 +366,9 @@ def main():
     optimizer = torch.optim.AdamW(
         trainable_parameters, lr=args.lr, weight_decay=args.weight_decay
     )
-    optimizer_steps_per_epoch = math.ceil(len(train_loader) / args.grad_accumulation)
     scheduler = make_scheduler(
         optimizer,
-        args.epochs * optimizer_steps_per_epoch,
+        args.epochs * len(train_loader),
         args.warmup_fraction,
     )
     scaler = torch.cuda.amp.GradScaler(
@@ -426,7 +422,6 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         model.train()
-        optimizer.zero_grad(set_to_none=True)
         totals = {"total": 0.0, "retrieval": 0.0, "semantic": 0.0}
         progress = tqdm(
             train_loader,
@@ -434,10 +429,11 @@ def main():
             unit="batch",
         )
 
-        for batch_index, (sketches, photos, labels) in enumerate(progress, start=1):
+        for sketches, photos, labels in progress:
             sketches = sketches.to(device, non_blocking=True)
             photos = photos.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
 
             with make_autocast(device, args.precision):
                 sketch_features = F.normalize(model.encode_image(sketches), dim=-1)
@@ -460,21 +456,14 @@ def main():
                     args.lambda_retrieval * loss_retrieval
                     + args.lambda_semantic * loss_semantic
                 )
-                scaled_loss = loss / args.grad_accumulation
 
-            scaler.scale(scaled_loss).backward()
-            should_step = (
-                batch_index % args.grad_accumulation == 0
-                or batch_index == len(train_loader)
-            )
-            if should_step:
-                if args.grad_clip > 0:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(trainable_parameters, args.grad_clip)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-                scheduler.step()
+            scaler.scale(loss).backward()
+            if args.grad_clip > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(trainable_parameters, args.grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
 
             totals["total"] += loss.item()
             totals["retrieval"] += loss_retrieval.item()
