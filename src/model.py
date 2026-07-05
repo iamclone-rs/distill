@@ -127,6 +127,51 @@ def _load_teacher_checkpoint(teacher, ckpt_path):
     )
 
 
+def _load_teacher_layernorm_checkpoint(teacher, args):
+    ckpt_path = getattr(args, "teacher_layernorm_ckpt", "")
+    if not ckpt_path:
+        return
+
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    state_dict = checkpoint.get("layernorm_state_dict")
+    if not isinstance(state_dict, dict) or not state_dict:
+        raise RuntimeError(
+            f"Invalid LayerNorm teacher checkpoint '{ckpt_path}': "
+            "missing layernorm_state_dict."
+        )
+
+    teacher_key = getattr(args, "teacher", "")
+    if teacher_key in _TEACHER_REGISTRY:
+        expected_model, expected_pretrained = _TEACHER_REGISTRY[teacher_key]
+        saved_model = checkpoint.get("model")
+        saved_pretrained = checkpoint.get("pretrained")
+        if saved_model and saved_model != expected_model:
+            raise RuntimeError(
+                f"LayerNorm model mismatch: checkpoint={saved_model}, teacher={expected_model}"
+            )
+        if saved_pretrained and saved_pretrained != expected_pretrained:
+            raise RuntimeError(
+                "LayerNorm pretrained-weight mismatch: "
+                f"checkpoint={saved_pretrained}, teacher={expected_pretrained}"
+            )
+
+    target_state = teacher.state_dict()
+    invalid = [
+        key for key, value in state_dict.items()
+        if key not in target_state or target_state[key].shape != value.shape
+    ]
+    if invalid:
+        raise RuntimeError(
+            f"LayerNorm checkpoint has {len(invalid)} incompatible tensors; "
+            f"first keys: {invalid[:5]}"
+        )
+    teacher.load_state_dict(state_dict, strict=False)
+    print(
+        f"[Teacher LayerNorm] loaded {ckpt_path} "
+        f"(epoch={checkpoint.get('epoch', 'unknown')}, tensors={len(state_dict)})"
+    )
+
+
 def _freeze_teacher(teacher):
     teacher.eval()
     for p in teacher.parameters():
@@ -243,6 +288,7 @@ def _load_teacher(args):
     teacher, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
     teacher.text_tokenizer = open_clip.get_tokenizer(model_name)
     _load_teacher_checkpoint(teacher, getattr(args, "teacher_ckpt", ""))
+    _load_teacher_layernorm_checkpoint(teacher, args)
     teacher = _freeze_teacher(teacher)
     teacher = teacher.to(device)
     if getattr(args, "quantize_fp16", False):
@@ -647,6 +693,12 @@ def _tensor_debug(name, value):
 class ZS_SBIR(pl.LightningModule):
     def __init__(self, args, classname):
         super(ZS_SBIR, self).__init__()
+        if getattr(args, "teacher_adapter_ckpt", "") and getattr(
+            args, "teacher_layernorm_ckpt", ""
+        ):
+            raise ValueError(
+                "Use either --teacher_adapter_ckpt or --teacher_layernorm_ckpt, not both."
+            )
         self.args = args
         self.classname = classname
         clip_model = load_clip_to_cpu(args)
