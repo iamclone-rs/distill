@@ -53,6 +53,12 @@ def print_run_config(args):
         f"nt_xent={args.lambda_nt_xent}"
     )
     print(
+        "[Output Feature Distill] weights -> "
+        f"sketch={args.lambda_output_sketch}, "
+        f"photo={args.lambda_output_photo}, "
+        f"sketch_photo={args.lambda_output_sketch_photo}"
+    )
+    print(
         "[Run] "
         f"dataset={args.dataset}, teacher={args.teacher}, distill_mode={args.distill_mode}, "
         f"quantize_fp16={args.quantize_fp16}, "
@@ -189,6 +195,12 @@ if __name__ == "__main__":
                         help='Trọng số KD-div cho ma trận quan hệ Sketch-Text.')
     parser.add_argument('--rkd_temperature', type=float, default=0.07,
                         help='Temperature cho KD-div similarity distribution.')
+    parser.add_argument('--lambda_output_sketch', type=float, default=0.0,
+                        help='Cosine output-feature distill: student sketch -> teacher adapted sketch.')
+    parser.add_argument('--lambda_output_photo', type=float, default=0.0,
+                        help='Cosine output-feature distill: student photo -> teacher adapted photo.')
+    parser.add_argument('--lambda_output_sketch_photo', type=float, default=0.0,
+                        help='Cosine output-feature distill: student sketch -> teacher adapted positive photo.')
     parser.add_argument('--lambda_infonce_photo', type=float, default=0.0,
                         help='Trọng số linear InfoNCE giữa student photo và teacher photo.')
     parser.add_argument('--lambda_infonce_sketch', type=float, default=0.0,

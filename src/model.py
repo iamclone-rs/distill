@@ -31,6 +31,13 @@ TEACHER_CHOICES = ["clip32", *_TEACHER_REGISTRY.keys()]
 def _needs_strong_teacher(args):
     if getattr(args, "teacher", "clip32") == "clip32":
         return False
+    output_feature_active = (
+        getattr(args, "lambda_output_sketch", 0.0) > 0
+        or getattr(args, "lambda_output_photo", 0.0) > 0
+        or getattr(args, "lambda_output_sketch_photo", 0.0) > 0
+    )
+    if output_feature_active:
+        return True
     distill_mode = getattr(args, "distill_mode", "kd_div")
     if distill_mode == "linear_infonce":
         return (
@@ -376,6 +383,11 @@ class CustomCLIP(nn.Module):
         lambda_ind_sketch = getattr(cfg, "lambda_ind_sketch", 0.0)
         lambda_ind_sketch_photo = getattr(cfg, "lambda_ind_sketch_photo", 0.0)
         lambda_ind_text = getattr(cfg, "lambda_ind_text", 0.0)
+        lambda_output_sketch = getattr(cfg, "lambda_output_sketch", 0.0)
+        lambda_output_photo = getattr(cfg, "lambda_output_photo", 0.0)
+        lambda_output_sketch_photo = getattr(
+            cfg, "lambda_output_sketch_photo", 0.0
+        )
 
         self._kd_image_distill_active = (
             lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
@@ -388,6 +400,11 @@ class CustomCLIP(nn.Module):
             lambda_ind_photo > 0
             or lambda_ind_sketch > 0
             or lambda_ind_sketch_photo > 0
+        )
+        self._output_feature_distill_active = (
+            lambda_output_sketch > 0
+            or lambda_output_photo > 0
+            or lambda_output_sketch_photo > 0
         )
         if self._distill_mode == "kd_div":
             self._image_distill_active = self._kd_image_distill_active
@@ -403,12 +420,18 @@ class CustomCLIP(nn.Module):
             self._need_teacher_text = lambda_ind_text > 0
         else:
             raise ValueError(f"Unknown distill_mode: {self._distill_mode}")
+        self._image_distill_active = (
+            self._image_distill_active or self._output_feature_distill_active
+        )
         self._teacher_fp16 = (
             self._use_strong_teacher
             and getattr(cfg, "quantize_fp16", False)
             and device.type == "cuda"
         )
         self._teacher_output_dim = getattr(strong_teacher, "output_dim", 512)
+        self._student_output_dim = int(
+            getattr(clip_model.visual, "output_dim", 512)
+        )
         self._project_to_teacher_dim = (
             self._distill_mode in ("linear_infonce", "independent_cosine")
             and self._use_strong_teacher
@@ -417,6 +440,14 @@ class CustomCLIP(nn.Module):
             self.distill_proj = nn.Linear(512, self._teacher_output_dim, bias=False).to(clip_model.dtype)
             if self._need_teacher_text:
                 self.text_distill_proj = nn.Linear(512, self._teacher_output_dim, bias=False).to(clip_model.dtype)
+        if lambda_output_sketch > 0 or lambda_output_sketch_photo > 0:
+            self.sketch_output_distill_proj = nn.Linear(
+                self._student_output_dim, self._teacher_output_dim, bias=False
+            ).to(clip_model.dtype)
+        if lambda_output_photo > 0:
+            self.photo_output_distill_proj = nn.Linear(
+                self._student_output_dim, self._teacher_output_dim, bias=False
+            ).to(clip_model.dtype)
         if self._need_teacher_text:
             self._teacher_text_cache = {}
         if self._distill_mode == "kd_div":
@@ -452,6 +483,16 @@ class CustomCLIP(nn.Module):
             )
         self.saved_features = defaultdict(lambda: {"sketch": [], "photo": []})
 
+        if self._output_feature_distill_active:
+            print(
+                "[Output Feature Distill] active branches -> "
+                f"sketch={lambda_output_sketch > 0} ({lambda_output_sketch}), "
+                f"photo={lambda_output_photo > 0} ({lambda_output_photo}), "
+                "sketch_photo="
+                f"{lambda_output_sketch_photo > 0} ({lambda_output_sketch_photo}), "
+                f"project_{self._student_output_dim}_to_{self._teacher_output_dim}=True"
+            )
+
     def project_image_distill_feature(self, feature):
         if not self._project_to_teacher_dim:
             return feature
@@ -461,6 +502,14 @@ class CustomCLIP(nn.Module):
         if not self._project_to_teacher_dim or not hasattr(self, "text_distill_proj"):
             return feature
         return self.text_distill_proj(feature.type(self.dtype))
+
+    def project_output_distill_feature(self, feature, modality):
+        projector = (
+            self.photo_output_distill_proj
+            if modality == "photo"
+            else self.sketch_output_distill_proj
+        )
+        return projector(feature.type(self.dtype))
     
     def teacher_image_input(self, image):
         if not self._use_strong_teacher:
@@ -581,6 +630,13 @@ class CustomCLIP(nn.Module):
             train_sketch_distill = getattr(self.cfg, "lambda_ind_sketch", 0.0) > 0
         else:
             raise ValueError(f"Unknown distill_mode: {self._distill_mode}")
+        train_photo_distill = train_photo_distill or (
+            getattr(self.cfg, "lambda_output_photo", 0.0) > 0
+            or getattr(self.cfg, "lambda_output_sketch_photo", 0.0) > 0
+        )
+        train_sketch_distill = train_sketch_distill or (
+            getattr(self.cfg, "lambda_output_sketch", 0.0) > 0
+        )
         photo_aug_features = photo_feature.detach()
         sk_aug_features = sk_feature.detach()
 
@@ -776,6 +832,14 @@ class ZS_SBIR(pl.LightningModule):
             self._print_module_param_row("distill_proj", self.model.distill_proj)
         if hasattr(self.model, "text_distill_proj"):
             self._print_module_param_row("text_distill_proj", self.model.text_distill_proj)
+        if hasattr(self.model, "sketch_output_distill_proj"):
+            self._print_module_param_row(
+                "sketch_output_proj", self.model.sketch_output_distill_proj
+            )
+        if hasattr(self.model, "photo_output_distill_proj"):
+            self._print_module_param_row(
+                "photo_output_proj", self.model.photo_output_distill_proj
+            )
 
         total_trainable = _count_params(self.model, trainable_only=True)
         print(f"[CoPrompt Debug] Total trainable params: {_fmt_params(total_trainable)}")
@@ -849,6 +913,7 @@ class ZS_SBIR(pl.LightningModule):
                 or k.startswith('infonce_')
                 or k.startswith('tw_')
                 or k.startswith('ind_')
+                or k.startswith('out_')
             )
             bar_name = (
                 k.replace("kd_sk_ph", "KD_SP")
@@ -863,6 +928,9 @@ class ZS_SBIR(pl.LightningModule):
                 .replace("ind_sketch_photo", "IND_SP")
                 .replace("ind_sketch", "IND_SK")
                 .replace("ind_text", "IND_TXT")
+                .replace("out_sketch_photo", "OUT_SP")
+                .replace("out_sketch", "OUT_SK")
+                .replace("out_photo", "OUT_PH")
             )
             self.log(bar_name, v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
         return loss

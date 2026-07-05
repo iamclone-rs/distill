@@ -92,6 +92,27 @@ def add_independent_cosine(loss_distill, loss_dict, name, weight, student_feat, 
     return loss_distill
 
 
+def output_feature_cosine_loss(student_feat, teacher_feat):
+    """Align normalized output features in FP32 after a modality-specific projection."""
+    student_device = student_feat.device
+    student_feat = F.normalize(student_feat.float(), dim=-1)
+    teacher_feat = F.normalize(
+        teacher_feat.to(device=student_device, dtype=torch.float32), dim=-1
+    )
+    return (1.0 - (student_feat * teacher_feat).sum(dim=-1)).mean()
+
+
+def add_output_feature_cosine(
+    loss_distill, loss_dict, name, weight, student_feat, teacher_feat
+):
+    if weight <= 0 or student_feat is None or teacher_feat is None:
+        return loss_distill
+    loss_value = output_feature_cosine_loss(student_feat, teacher_feat)
+    loss_distill = loss_distill + weight * loss_value
+    loss_dict[name] = loss_value
+    return loss_distill
+
+
 def teacher_weighted_ntxent_loss(
     student_sketch_feat,
     student_photo_feat,
@@ -336,6 +357,44 @@ def loss_fn(args, model, features, mode='train'):
         )
     else:
         raise ValueError(f"Unknown distill_mode: {distill_mode}")
+
+    lambda_output_sketch = getattr(args, "lambda_output_sketch", 0.0)
+    lambda_output_photo = getattr(args, "lambda_output_photo", 0.0)
+    lambda_output_sketch_photo = getattr(
+        args, "lambda_output_sketch_photo", 0.0
+    )
+    if lambda_output_sketch > 0 or lambda_output_sketch_photo > 0:
+        projected_sketch = model.project_output_distill_feature(
+            sk_features, "sketch"
+        )
+        loss_distill = add_output_feature_cosine(
+            loss_distill,
+            loss_dict,
+            "out_sketch",
+            lambda_output_sketch,
+            projected_sketch,
+            sk_aug_features,
+        )
+        loss_distill = add_output_feature_cosine(
+            loss_distill,
+            loss_dict,
+            "out_sketch_photo",
+            lambda_output_sketch_photo,
+            projected_sketch,
+            photo_aug_features,
+        )
+    if lambda_output_photo > 0:
+        projected_photo = model.project_output_distill_feature(
+            photo_features, "photo"
+        )
+        loss_distill = add_output_feature_cosine(
+            loss_distill,
+            loss_dict,
+            "out_photo",
+            lambda_output_photo,
+            projected_photo,
+            photo_aug_features,
+        )
 
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(
