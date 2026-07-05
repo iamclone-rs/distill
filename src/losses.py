@@ -10,10 +10,21 @@ def kd_div_loss(student_feat1, student_feat2, teacher_feat1, teacher_feat2, temp
     KL-divergence distillation trên cosine similarity matrix.
     Ép phân bố quan hệ giữa hai tập feature của student giống teacher.
     """
-    s1 = F.normalize(student_feat1, dim=-1)
-    s2 = F.normalize(student_feat2, dim=-1)
-    t1 = F.normalize(teacher_feat1, dim=-1)
-    t2 = F.normalize(teacher_feat2, dim=-1)
+    # Similarity distributions are more stable in FP32. This also handles mixed
+    # teacher branches, e.g. an FP32 image adapter with an FP16 text encoder.
+    student_device = student_feat1.device
+    s1 = F.normalize(
+        student_feat1.to(device=student_device, dtype=torch.float32), dim=-1
+    )
+    s2 = F.normalize(
+        student_feat2.to(device=student_device, dtype=torch.float32), dim=-1
+    )
+    t1 = F.normalize(
+        teacher_feat1.to(device=student_device, dtype=torch.float32), dim=-1
+    )
+    t2 = F.normalize(
+        teacher_feat2.to(device=student_device, dtype=torch.float32), dim=-1
+    )
 
     sim_s = (s1 @ s2.t()) / temperature
     log_p_s = F.log_softmax(sim_s, dim=-1)
