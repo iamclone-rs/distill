@@ -49,7 +49,6 @@ def _needs_strong_teacher(args):
         )
     return (
         getattr(args, "lambda_rkd_sk_ph", 0.0) > 0
-        or getattr(args, "lambda_rkd_ph_sk", 0.0) > 0
         or getattr(args, "lambda_rkd_ph_txt", 0.0) > 0
         or getattr(args, "lambda_rkd_sk_txt", 0.0) > 0
     )
@@ -367,7 +366,6 @@ class CustomCLIP(nn.Module):
         
         self._distill_mode = getattr(cfg, "distill_mode", "kd_div")
         lambda_rkd_sk_ph = getattr(cfg, "lambda_rkd_sk_ph", 0.0)
-        lambda_rkd_ph_sk = getattr(cfg, "lambda_rkd_ph_sk", 0.0)
         lambda_rkd_ph_txt = getattr(cfg, "lambda_rkd_ph_txt", 0.0)
         lambda_rkd_sk_txt = getattr(cfg, "lambda_rkd_sk_txt", 0.0)
         lambda_infonce_photo = getattr(cfg, "lambda_infonce_photo", 0.0)
@@ -380,10 +378,7 @@ class CustomCLIP(nn.Module):
         lambda_ind_text = getattr(cfg, "lambda_ind_text", 0.0)
 
         self._kd_image_distill_active = (
-            lambda_rkd_sk_ph > 0
-            or lambda_rkd_ph_sk > 0
-            or lambda_rkd_ph_txt > 0
-            or lambda_rkd_sk_txt > 0
+            lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
         )
         self._infonce_image_distill_active = (
             lambda_infonce_photo > 0 or lambda_infonce_sketch > 0
@@ -428,7 +423,6 @@ class CustomCLIP(nn.Module):
             print(
                 "[KD-div] active branches -> "
                 f"sk_ph={lambda_rkd_sk_ph > 0} ({lambda_rkd_sk_ph}), "
-                f"ph_sk={lambda_rkd_ph_sk > 0} ({lambda_rkd_ph_sk}), "
                 f"ph_txt={lambda_rkd_ph_txt > 0} ({lambda_rkd_ph_txt}), "
                 f"sk_txt={lambda_rkd_sk_txt > 0} ({lambda_rkd_sk_txt})"
             )
@@ -569,19 +563,10 @@ class CustomCLIP(nn.Module):
         
         if self._distill_mode == "kd_div":
             lambda_rkd_sk_ph = getattr(self.cfg, "lambda_rkd_sk_ph", 0.0)
-            lambda_rkd_ph_sk = getattr(self.cfg, "lambda_rkd_ph_sk", 0.0)
             lambda_rkd_ph_txt = getattr(self.cfg, "lambda_rkd_ph_txt", 0.0)
             lambda_rkd_sk_txt = getattr(self.cfg, "lambda_rkd_sk_txt", 0.0)
-            train_photo_distill = (
-                lambda_rkd_sk_ph > 0
-                or lambda_rkd_ph_sk > 0
-                or lambda_rkd_ph_txt > 0
-            )
-            train_sketch_distill = (
-                lambda_rkd_sk_ph > 0
-                or lambda_rkd_ph_sk > 0
-                or lambda_rkd_sk_txt > 0
-            )
+            train_photo_distill = lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0
+            train_sketch_distill = lambda_rkd_sk_ph > 0 or lambda_rkd_sk_txt > 0
         elif self._distill_mode == "linear_infonce":
             train_photo_distill = getattr(self.cfg, "lambda_infonce_photo", 0.0) > 0
             train_sketch_distill = getattr(self.cfg, "lambda_infonce_sketch", 0.0) > 0
