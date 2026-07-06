@@ -1,4 +1,4 @@
-"""Standalone zero-shot semantic and SBIR evaluation for OpenCLIP models."""
+"""Standalone zero-shot semantic and SBIR evaluation for teacher models."""
 
 import argparse
 import json
@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
 from src.data_config import UNSEEN_CLASSES
+from src.teacher_adapter import DFN_MODEL_NAME, DFN_PRETRAINED
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -228,8 +229,6 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True, help="Dataset root containing sketch/ and photo/.")
     parser.add_argument("--dataset", default="sketchy_2", choices=sorted(UNSEEN_CLASSES))
-    parser.add_argument("--model", default="ViT-H-14")
-    parser.add_argument("--pretrained", default="laion2b_s32b_b79k")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--retrieval_chunk_size", type=int, default=256)
@@ -241,7 +240,6 @@ def parse_args():
         default=None,
         help="Deprecated: overrides both map_k and precision_k.",
     )
-    parser.add_argument("--fp16", action="store_true")
     parser.add_argument(
         "--max_per_class",
         type=int,
@@ -263,16 +261,14 @@ def main():
     torch.manual_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    use_fp16 = args.fp16 and device.type == "cuda"
-    if args.fp16 and not use_fp16:
-        print("FP16 requested without CUDA; using FP32.")
+    use_fp16 = device.type == "cuda"
 
-    print(f"Loading {args.model} ({args.pretrained}) on {device}...")
+    print(f"Loading {DFN_MODEL_NAME} ({DFN_PRETRAINED}) on {device}...")
     model, _, preprocess = open_clip.create_model_and_transforms(
-        args.model,
-        pretrained=args.pretrained,
+        DFN_MODEL_NAME,
+        pretrained=DFN_PRETRAINED,
     )
-    tokenizer = open_clip.get_tokenizer(args.model)
+    tokenizer = open_clip.get_tokenizer(DFN_MODEL_NAME)
     model = model.eval().to(device)
     if use_fp16:
         model = model.half()
@@ -338,8 +334,8 @@ def main():
         torch.cuda.empty_cache()
 
     results = {
-        "model": args.model,
-        "pretrained": args.pretrained,
+        "model": DFN_MODEL_NAME,
+        "pretrained": DFN_PRETRAINED,
         "dataset": args.dataset,
         "classes": len(classnames),
         "sketch_zero_shot": classification_metrics(
