@@ -1,4 +1,4 @@
-"""Standalone zero-shot semantic and SBIR evaluation for OpenCLIP models."""
+"""Zero-shot semantic and SBIR evaluation for an OpenCLIP teacher on Sketchy."""
 
 import argparse
 import json
@@ -122,7 +122,7 @@ def retrieval_at_k(
     map_k=200,
     precision_k=None,
     chunk_size=256,
-    description="Sketch-to-photo retrieval",
+    description="Sketch→photo retrieval",
     show_progress=True,
     top_k=None,
 ):
