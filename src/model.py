@@ -32,8 +32,6 @@ def _needs_strong_teacher(args):
     if getattr(args, "teacher", "clip32") == "clip32":
         return False
     distill_mode = getattr(args, "distill_mode", "kd_div")
-    if distill_mode == "corr_dist":
-        return getattr(args, "lambda_corr_sk_ph", 0.0) > 0
     if distill_mode == "linear_infonce":
         return (
             getattr(args, "lambda_infonce_photo", 0.0) > 0
@@ -370,7 +368,6 @@ class CustomCLIP(nn.Module):
         lambda_rkd_sk_ph = getattr(cfg, "lambda_rkd_sk_ph", 0.0)
         lambda_rkd_ph_txt = getattr(cfg, "lambda_rkd_ph_txt", 0.0)
         lambda_rkd_sk_txt = getattr(cfg, "lambda_rkd_sk_txt", 0.0)
-        lambda_corr_sk_ph = getattr(cfg, "lambda_corr_sk_ph", 0.0)
         lambda_infonce_photo = getattr(cfg, "lambda_infonce_photo", 0.0)
         lambda_infonce_sketch = getattr(cfg, "lambda_infonce_sketch", 0.0)
         lambda_infonce_text = getattr(cfg, "lambda_infonce_text", 0.0)
@@ -383,7 +380,6 @@ class CustomCLIP(nn.Module):
         self._kd_image_distill_active = (
             lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
         )
-        self._corr_image_distill_active = lambda_corr_sk_ph > 0
         self._infonce_image_distill_active = (
             lambda_infonce_photo > 0 or lambda_infonce_sketch > 0
         )
@@ -396,9 +392,6 @@ class CustomCLIP(nn.Module):
         if self._distill_mode == "kd_div":
             self._image_distill_active = self._kd_image_distill_active
             self._need_teacher_text = lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
-        elif self._distill_mode == "corr_dist":
-            self._image_distill_active = self._corr_image_distill_active
-            self._need_teacher_text = False
         elif self._distill_mode == "linear_infonce":
             self._image_distill_active = self._infonce_image_distill_active
             self._need_teacher_text = lambda_infonce_text > 0
@@ -432,12 +425,6 @@ class CustomCLIP(nn.Module):
                 f"sk_ph={lambda_rkd_sk_ph > 0} ({lambda_rkd_sk_ph}), "
                 f"ph_txt={lambda_rkd_ph_txt > 0} ({lambda_rkd_ph_txt}), "
                 f"sk_txt={lambda_rkd_sk_txt > 0} ({lambda_rkd_sk_txt})"
-            )
-        elif self._distill_mode == "corr_dist":
-            print(
-                "[Correlation Distill] active -> "
-                f"sk_ph={lambda_corr_sk_ph > 0} ({lambda_corr_sk_ph}), "
-                "components=row_pearson+global_pearson"
             )
         elif self._distill_mode == "linear_infonce":
             print(
@@ -580,9 +567,6 @@ class CustomCLIP(nn.Module):
             lambda_rkd_sk_txt = getattr(self.cfg, "lambda_rkd_sk_txt", 0.0)
             train_photo_distill = lambda_rkd_sk_ph > 0 or lambda_rkd_ph_txt > 0
             train_sketch_distill = lambda_rkd_sk_ph > 0 or lambda_rkd_sk_txt > 0
-        elif self._distill_mode == "corr_dist":
-            train_photo_distill = getattr(self.cfg, "lambda_corr_sk_ph", 0.0) > 0
-            train_sketch_distill = train_photo_distill
         elif self._distill_mode == "linear_infonce":
             train_photo_distill = getattr(self.cfg, "lambda_infonce_photo", 0.0) > 0
             train_sketch_distill = getattr(self.cfg, "lambda_infonce_sketch", 0.0) > 0
@@ -862,14 +846,12 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             show_on_bar = (
                 k.startswith('kd_')
-                or k.startswith('corr_')
                 or k.startswith('infonce_')
                 or k.startswith('tw_')
                 or k.startswith('ind_')
             )
             bar_name = (
                 k.replace("kd_sk_ph", "KD_SP")
-                .replace("corr_sk_ph", "CORR_SP")
                 .replace("kd_ph_txt", "KD_PT")
                 .replace("kd_sk_txt", "KD_ST")
                 .replace("infonce_photo_text", "I_PT")

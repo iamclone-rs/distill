@@ -37,11 +37,6 @@ def print_run_config(args):
             f"alpha={args.tw_alpha}, "
             f"temp={args.tw_temperature}"
         )
-    elif args.distill_mode == "corr_dist":
-        print(
-            "[Correlation Distill] "
-            f"sk_ph={args.lambda_corr_sk_ph} (row + global Pearson)"
-        )
     else:
         print(
             "[KD-div Distill] weights -> "
@@ -182,8 +177,8 @@ if __name__ == "__main__":
     parser.add_argument('--teacher_layernorm_ckpt', type=str, default='',
                         help='Checkpoint LayerNorm-only đã fine-tune cho strong teacher.')
     parser.add_argument('--distill_mode', type=str, default='kd_div',
-                        choices=['kd_div', 'corr_dist', 'linear_infonce', 'teacher_weighted_ntxent', 'independent_cosine'],
-                        help='Chọn phương pháp distill: kd_div, corr_dist, linear_infonce, teacher_weighted_ntxent, hoặc independent_cosine.')
+                        choices=['kd_div', 'linear_infonce', 'teacher_weighted_ntxent', 'independent_cosine'],
+                        help='Chọn phương pháp distill: kd_div, linear_infonce, teacher_weighted_ntxent, hoặc independent_cosine.')
     parser.add_argument('--use_rkd', action='store_true', default=False,
                         help=argparse.SUPPRESS)
     parser.add_argument('--lambda_rkd_sk_ph', type=float, default=0.0,
@@ -194,8 +189,6 @@ if __name__ == "__main__":
                         help='Trọng số KD-div cho ma trận quan hệ Sketch-Text.')
     parser.add_argument('--rkd_temperature', type=float, default=0.07,
                         help='Temperature cho KD-div similarity distribution.')
-    parser.add_argument('--lambda_corr_sk_ph', type=float, default=0.0,
-                        help='Trọng số Pearson correlation distill cho ma trận Sketch-Photo.')
     parser.add_argument('--lambda_infonce_photo', type=float, default=0.0,
                         help='Trọng số linear InfoNCE giữa student photo và teacher photo.')
     parser.add_argument('--lambda_infonce_sketch', type=float, default=0.0,

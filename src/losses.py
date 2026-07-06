@@ -52,46 +52,6 @@ def add_kd_div(loss_distill, loss_dict, name, weight, student_feat1, student_fea
     return loss_distill
 
 
-def _pearson_correlation(first, second, dim=-1, eps=1e-8):
-    first = first - first.mean(dim=dim, keepdim=True)
-    second = second - second.mean(dim=dim, keepdim=True)
-    numerator = (first * second).sum(dim=dim)
-    denominator = (
-        first.square().sum(dim=dim) * second.square().sum(dim=dim)
-    ).clamp_min(eps).sqrt()
-    return (numerator / denominator).clamp(min=-1.0, max=1.0)
-
-
-def correlation_distill_loss(
-    student_sketch,
-    student_photo,
-    teacher_sketch,
-    teacher_photo,
-):
-    """DIST-style row-wise and global Pearson matching of sketch-photo relations."""
-    student_device = student_sketch.device
-    student_sketch = F.normalize(student_sketch.float(), dim=-1)
-    student_photo = F.normalize(
-        student_photo.to(device=student_device, dtype=torch.float32), dim=-1
-    )
-    sim_student = student_sketch @ student_photo.t()
-
-    with torch.no_grad():
-        teacher_sketch = F.normalize(
-            teacher_sketch.to(device=student_device, dtype=torch.float32), dim=-1
-        )
-        teacher_photo = F.normalize(
-            teacher_photo.to(device=student_device, dtype=torch.float32), dim=-1
-        )
-        sim_teacher = teacher_sketch @ teacher_photo.t()
-
-    row_correlation = _pearson_correlation(sim_student, sim_teacher, dim=-1)
-    global_correlation = _pearson_correlation(
-        sim_student.flatten(), sim_teacher.flatten(), dim=0
-    )
-    return (1.0 - row_correlation.mean()) + (1.0 - global_correlation)
-
-
 def infonce_distill_loss(student_feat, teacher_feat, temperature=0.07):
     teacher_feat = teacher_feat.to(dtype=student_feat.dtype, device=student_feat.device)
     student_feat = F.normalize(student_feat, dim=1)
@@ -285,17 +245,6 @@ def loss_fn(args, model, features, mode='train'):
             teacher_text_features,
             temp,
         )
-    elif distill_mode == "corr_dist":
-        weight = getattr(args, "lambda_corr_sk_ph", 0.0)
-        if weight > 0:
-            corr_loss = correlation_distill_loss(
-                sk_distill_features,
-                photo_distill_features,
-                sk_aug_features,
-                photo_aug_features,
-            )
-            loss_distill = loss_distill + weight * corr_loss
-            loss_dict["corr_sk_ph"] = corr_loss
     elif distill_mode == "linear_infonce":
         temp = getattr(args, "infonce_temperature", getattr(args, "temperature", 0.07))
         loss_distill = add_infonce_distill(
