@@ -219,6 +219,7 @@ def _load_teacher_adapters(args, strong_teacher):
     adapters = ModalityAdapters(
         feature_dim=feature_dim,
         bottleneck_dim=int(checkpoint["bottleneck_dim"]),
+        adapter_mode=checkpoint.get("adapter_mode", "residual"),
     )
     adapters.load_state_dict(checkpoint["adapter_state_dict"], strict=True)
     adapters.eval().requires_grad_(False)
@@ -226,7 +227,8 @@ def _load_teacher_adapters(args, strong_teacher):
     print(
         f"[Teacher Adapter] loaded {ckpt_path} "
         f"(epoch={checkpoint.get('epoch', 'unknown')}, feature_dim={feature_dim}, "
-        f"bottleneck={checkpoint['bottleneck_dim']})"
+        f"bottleneck={checkpoint['bottleneck_dim']}, "
+        f"mode={checkpoint.get('adapter_mode', 'residual')})"
     )
     return adapters
 

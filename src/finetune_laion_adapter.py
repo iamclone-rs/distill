@@ -73,26 +73,34 @@ class FeaturePairDataset(Dataset):
 
 
 class ResidualAdapter(nn.Module):
-    def __init__(self, feature_dim, bottleneck_dim=64):
+    def __init__(self, feature_dim, bottleneck_dim=64, adapter_mode="residual"):
         super().__init__()
+        if adapter_mode not in ("residual", "non_residual"):
+            raise ValueError(f"Unknown adapter_mode: {adapter_mode}")
+        self.adapter_mode = adapter_mode
         self.norm = nn.LayerNorm(feature_dim)
         self.down = nn.Linear(feature_dim, bottleneck_dim)
         self.up = nn.Linear(bottleneck_dim, feature_dim)
         nn.init.xavier_uniform_(self.down.weight)
         nn.init.zeros_(self.down.bias)
-        nn.init.zeros_(self.up.weight)
+        if adapter_mode == "residual":
+            nn.init.zeros_(self.up.weight)
+        else:
+            nn.init.xavier_uniform_(self.up.weight)
         nn.init.zeros_(self.up.bias)
 
     def forward(self, features):
-        residual = self.up(F.gelu(self.down(self.norm(features))))
-        return F.normalize(features + residual, dim=-1)
+        adapted = self.up(F.gelu(self.down(self.norm(features))))
+        if self.adapter_mode == "residual":
+            adapted = features + adapted
+        return F.normalize(adapted, dim=-1)
 
 
 class ModalityAdapters(nn.Module):
-    def __init__(self, feature_dim, bottleneck_dim):
+    def __init__(self, feature_dim, bottleneck_dim, adapter_mode="residual"):
         super().__init__()
-        self.sketch = ResidualAdapter(feature_dim, bottleneck_dim)
-        self.photo = ResidualAdapter(feature_dim, bottleneck_dim)
+        self.sketch = ResidualAdapter(feature_dim, bottleneck_dim, adapter_mode)
+        self.photo = ResidualAdapter(feature_dim, bottleneck_dim, adapter_mode)
 
 
 def list_images(class_dir):
@@ -246,6 +254,7 @@ def save_checkpoint(path, adapters, args, epoch, metrics, seen_classes, unseen_c
             },
             "feature_dim": adapters.sketch.norm.normalized_shape[0],
             "bottleneck_dim": args.bottleneck_dim,
+            "adapter_mode": args.adapter_mode,
             "model": args.model,
             "pretrained": args.pretrained,
             "dataset": args.dataset,
@@ -269,6 +278,12 @@ def parse_args():
     parser.add_argument("--encode_batch_size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--bottleneck_dim", type=int, default=64)
+    parser.add_argument(
+        "--adapter_mode",
+        choices=("residual", "non_residual"),
+        default="residual",
+        help="Use x + adapter(x), or adapter(x) without the residual skip.",
+    )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--temperature", type=float, default=0.07)
@@ -423,9 +438,16 @@ def main():
         generator=generator,
     )
 
-    adapters = ModalityAdapters(feature_dim, args.bottleneck_dim).to(device)
+    adapters = ModalityAdapters(
+        feature_dim,
+        args.bottleneck_dim,
+        adapter_mode=args.adapter_mode,
+    ).to(device)
     trainable = sum(parameter.numel() for parameter in adapters.parameters())
-    print(f"Adapter trainable parameters: {trainable:,} ({trainable / 1e6:.3f}M)")
+    print(
+        f"Adapter mode={args.adapter_mode}; trainable parameters: "
+        f"{trainable:,} ({trainable / 1e6:.3f}M)"
+    )
     optimizer = torch.optim.AdamW(
         adapters.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
