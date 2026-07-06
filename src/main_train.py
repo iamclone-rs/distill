@@ -58,7 +58,6 @@ def print_run_config(args):
         f"quantize_fp16={args.quantize_fp16}, "
         f"teacher_ckpt={args.teacher_ckpt or 'default'}, "
         f"teacher_adapter={args.teacher_adapter_ckpt or 'none'}, "
-        f"teacher_lora={args.teacher_lora_ckpt or 'none'}, "
         f"teacher_layernorm={args.teacher_layernorm_ckpt or 'none'}, seed={args.seed}"
     )
 
@@ -175,8 +174,6 @@ if __name__ == "__main__":
                         help='Đường dẫn checkpoint để load weight cho strong teacher dfn5b.')
     parser.add_argument('--teacher_adapter_ckpt', type=str, default='',
                         help='Checkpoint modality adapter đã fine-tune cho strong teacher.')
-    parser.add_argument('--teacher_lora_ckpt', type=str, default='',
-                        help='Checkpoint modality-specific visual Q/V LoRA cho strong teacher.')
     parser.add_argument('--teacher_layernorm_ckpt', type=str, default='',
                         help='Checkpoint LayerNorm-only đã fine-tune cho strong teacher.')
     parser.add_argument('--distill_mode', type=str, default='kd_div',
