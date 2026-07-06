@@ -689,6 +689,91 @@ def _tensor_debug(name, value):
             norm = value.detach().float().norm(dim=-1).mean().item()
         text += f" mean_norm={norm:.4f}"
     return text
+
+
+def _pcgrad_group_for_parameter(name):
+    if name.startswith("sk_encoder."):
+        return "sketch"
+    if name.startswith("ph_encoder."):
+        return "photo"
+    sketch_prompt_prefix = "prompt_learner_sketch."
+    if name.startswith(sketch_prompt_prefix):
+        local_name = name[len(sketch_prompt_prefix):]
+        if not local_name.startswith("clip_model."):
+            return "sketch"
+    photo_prompt_prefix = "prompt_learner_photo."
+    if name.startswith(photo_prompt_prefix):
+        local_name = name[len(photo_prompt_prefix):]
+        if not local_name.startswith("clip_model."):
+            return "photo"
+    return "shared"
+
+
+def _task_priority_pcgrad(task_grads, kd_grads, group_names, eps=1e-12):
+    """Project only a conflicting KD gradient; preserve the task gradient."""
+    final_grads = [None] * len(task_grads)
+    stats = {}
+    for group_name in ("sketch", "photo", "shared"):
+        indices = [
+            index for index, name in enumerate(group_names) if name == group_name
+        ]
+        reference = next(
+            (
+                gradient
+                for index in indices
+                for gradient in (task_grads[index], kd_grads[index])
+                if gradient is not None
+            ),
+            None,
+        )
+        if reference is None:
+            stats[group_name] = {"cosine": 0.0, "conflict": 0.0}
+            continue
+
+        dot = torch.zeros((), device=reference.device, dtype=torch.float32)
+        task_sq = torch.zeros_like(dot)
+        kd_sq = torch.zeros_like(dot)
+        for index in indices:
+            task_grad = task_grads[index]
+            kd_grad = kd_grads[index]
+            if task_grad is not None:
+                task_sq = task_sq + task_grad.detach().float().square().sum()
+            if kd_grad is not None:
+                kd_sq = kd_sq + kd_grad.detach().float().square().sum()
+            if task_grad is not None and kd_grad is not None:
+                dot = dot + (
+                    task_grad.detach().float() * kd_grad.detach().float()
+                ).sum()
+
+        denominator = (task_sq * kd_sq).sqrt().clamp_min(eps)
+        cosine = (dot / denominator).clamp(min=-1.0, max=1.0)
+        conflict = bool((dot < 0).item() and (task_sq > eps).item())
+        coefficient = dot / task_sq.clamp_min(eps) if conflict else None
+
+        for index in indices:
+            task_grad = task_grads[index]
+            kd_grad = kd_grads[index]
+            if task_grad is None and kd_grad is None:
+                continue
+            if task_grad is None:
+                final_grad = kd_grad
+            elif kd_grad is None:
+                final_grad = task_grad
+            else:
+                aligned_kd = kd_grad
+                if coefficient is not None:
+                    aligned_kd = kd_grad - coefficient.to(
+                        device=kd_grad.device, dtype=kd_grad.dtype
+                    ) * task_grad
+                final_grad = task_grad + aligned_kd
+            final_grads[index] = final_grad.detach()
+
+        stats[group_name] = {
+            "cosine": float(cosine.detach().cpu()),
+            "conflict": float(conflict),
+        }
+
+    return final_grads, stats
             
 class ZS_SBIR(pl.LightningModule):
     def __init__(self, args, classname):
@@ -700,6 +785,20 @@ class ZS_SBIR(pl.LightningModule):
                 "Use either --teacher_adapter_ckpt or --teacher_layernorm_ckpt, not both."
             )
         self.args = args
+        self._gradient_align_kd = getattr(args, "gradient_align_kd", False)
+        if self._gradient_align_kd:
+            if getattr(args, "distill_mode", "kd_div") != "kd_div":
+                raise ValueError("--gradient_align_kd currently requires --distill_mode kd_div.")
+            if not any(
+                getattr(args, name, 0.0) > 0
+                for name in (
+                    "lambda_rkd_sk_ph",
+                    "lambda_rkd_ph_txt",
+                    "lambda_rkd_sk_txt",
+                )
+            ):
+                raise ValueError("--gradient_align_kd requires at least one active KD branch.")
+        self.automatic_optimization = not self._gradient_align_kd
         self.classname = classname
         clip_model = load_clip_to_cpu(args)
         
@@ -807,6 +906,42 @@ class ZS_SBIR(pl.LightningModule):
     
     def forward(self, data, classname):
         return self.model(data, classname)
+
+    def _pcgrad_step(self, task_loss, distill_loss):
+        optimizer = self.optimizers()
+        optimizer.zero_grad()
+
+        named_parameters = [
+            (name, parameter)
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad
+        ]
+        parameters = [parameter for _, parameter in named_parameters]
+        group_names = [
+            _pcgrad_group_for_parameter(name) for name, _ in named_parameters
+        ]
+        task_grads = torch.autograd.grad(
+            task_loss,
+            parameters,
+            retain_graph=True,
+            allow_unused=True,
+        )
+        kd_grads = torch.autograd.grad(
+            distill_loss,
+            parameters,
+            retain_graph=False,
+            allow_unused=True,
+        )
+        final_grads, stats = _task_priority_pcgrad(
+            task_grads, kd_grads, group_names
+        )
+        for parameter, gradient in zip(parameters, final_grads):
+            parameter.grad = gradient
+
+        if not self._grad_debug_printed:
+            self.on_after_backward()
+        optimizer.step()
+        return stats
     
     def training_step(self, batch, batch_idx):
         classname = get_all_categories(self.args)
@@ -841,8 +976,41 @@ class ZS_SBIR(pl.LightningModule):
             print("=" * 78)
             self._feature_debug_printed = True
         
-        loss, loss_dict = loss_fn(self.args, self.model, features=features, mode='train')
-        self.log('train_loss', loss, on_step=False, on_epoch=True)
+        if self._gradient_align_kd:
+            loss, loss_dict, task_loss, distill_loss = loss_fn(
+                self.args,
+                self.model,
+                features=features,
+                mode='train',
+                return_components=True,
+            )
+            pcgrad_stats = self._pcgrad_step(task_loss, distill_loss)
+            for group_name, short_name in (
+                ("sketch", "SK"),
+                ("photo", "PH"),
+                ("shared", "SH"),
+            ):
+                group_stats = pcgrad_stats[group_name]
+                self.log(
+                    f"PC_COS_{short_name}",
+                    group_stats["cosine"],
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=group_name != "shared",
+                )
+                self.log(
+                    f"PC_CONFLICT_{short_name}",
+                    group_stats["conflict"],
+                    on_step=False,
+                    on_epoch=True,
+                )
+            self.log("task_loss", task_loss.detach(), on_step=False, on_epoch=True)
+            self.log("distill_loss", distill_loss.detach(), on_step=False, on_epoch=True)
+        else:
+            loss, loss_dict = loss_fn(
+                self.args, self.model, features=features, mode='train'
+            )
+        self.log('train_loss', loss.detach(), on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
             show_on_bar = (
                 k.startswith('kd_')
@@ -865,7 +1033,13 @@ class ZS_SBIR(pl.LightningModule):
                 .replace("ind_text", "IND_TXT")
             )
             self.log(bar_name, v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
-        return loss
+        return loss.detach() if self._gradient_align_kd else loss
+
+    def on_train_epoch_end(self):
+        if self._gradient_align_kd:
+            scheduler = self.lr_schedulers()
+            if scheduler is not None:
+                scheduler.step()
 
     def on_after_backward(self):
         if self._grad_debug_printed or not getattr(self.trainer, "is_global_zero", True):

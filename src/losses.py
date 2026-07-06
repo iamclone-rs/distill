@@ -184,7 +184,7 @@ def nt_xent(features_view1: torch.Tensor, features_view2: torch.Tensor):
     return loss
 
 
-def loss_fn(args, model, features, mode='train'):
+def loss_fn(args, model, features, mode='train', return_components=False):
     photo_features_norm, sk_feature_norm, photo_aug_features, sk_aug_features, \
         neg_features, label, pos_logits, sk_logits, photo_features, sk_features = features[:10]
 
@@ -350,15 +350,17 @@ def loss_fn(args, model, features, mode='train'):
     else:
         nt_xent_loss = torch.tensor(0.0, device=pos_logits.device)
     
-    total_loss = (
+    task_loss = (
         lambda_cls * loss_cls \
         + lambda_triplet * loss_triplet \
-        + loss_distill \
         + lambda_nt_xent * nt_xent_loss
     )
+    total_loss = task_loss + loss_distill
     
     loss_dict['cls'] = loss_cls
     loss_dict['triplet'] = loss_triplet
     loss_dict['nt_xent'] = nt_xent_loss
     
+    if return_components:
+        return total_loss, loss_dict, task_loss, loss_distill
     return total_loss, loss_dict
