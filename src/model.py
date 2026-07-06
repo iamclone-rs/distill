@@ -1,4 +1,6 @@
 import copy
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -14,6 +16,12 @@ from src.utils import load_clip_to_cpu, get_all_categories, retrieval_precision,
 from src.losses import loss_fn
 from src.data_config import VISUALIZE_CLASSES, UNSEEN_CLASSES
 from src.finetune_laion_adapter import ModalityAdapters
+from src.laion_lora import (
+    inject_visual_qv_lora,
+    load_lora_state_dict,
+    lora_parameter_count,
+    set_lora_modality,
+)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -172,6 +180,60 @@ def _load_teacher_layernorm_checkpoint(teacher, args):
     )
 
 
+def _load_teacher_lora_checkpoint(teacher, args, model_name, pretrained):
+    ckpt_path = getattr(args, "teacher_lora_ckpt", "")
+    if not ckpt_path:
+        return
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    state_dict = checkpoint.get("lora_state_dict")
+    if not isinstance(state_dict, dict) or not state_dict:
+        raise RuntimeError(
+            f"Invalid LoRA checkpoint '{ckpt_path}': missing lora_state_dict."
+        )
+    if checkpoint.get("target") not in (None, "visual_qv"):
+        raise RuntimeError(f"Unsupported LoRA target: {checkpoint.get('target')}")
+    if checkpoint.get("model") not in (None, model_name):
+        raise RuntimeError(
+            f"LoRA model mismatch: {checkpoint.get('model')} != {model_name}"
+        )
+    if checkpoint.get("pretrained") not in (None, pretrained):
+        raise RuntimeError(
+            "LoRA pretrained mismatch: "
+            f"{checkpoint.get('pretrained')} != {pretrained}"
+        )
+    adapter_path = getattr(args, "teacher_adapter_ckpt", "")
+    if checkpoint.get("adapter_ckpt") and not adapter_path:
+        raise RuntimeError(
+            "This LoRA was trained together with an output adapter. "
+            "Pass both --teacher_adapter_ckpt and --teacher_lora_ckpt."
+        )
+    if checkpoint.get("joint_adapter") and (
+        Path(adapter_path).resolve() != Path(ckpt_path).resolve()
+    ):
+        raise RuntimeError(
+            "This checkpoint jointly trained LoRA and the output adapter. "
+            "Point both --teacher_adapter_ckpt and --teacher_lora_ckpt to "
+            "the same combined checkpoint."
+        )
+    rank = int(checkpoint.get("rank", 16))
+    alpha = float(checkpoint.get("alpha", 32.0))
+    dropout = float(checkpoint.get("dropout", 0.05))
+    num_layers = int(checkpoint.get("num_layers", 4))
+    layer_indices = inject_visual_qv_lora(
+        teacher,
+        num_layers=num_layers,
+        rank=rank,
+        alpha=alpha,
+        dropout=dropout,
+    )
+    load_lora_state_dict(teacher, state_dict)
+    print(
+        f"[Teacher LoRA] loaded {ckpt_path} "
+        f"(epoch={checkpoint.get('epoch', 'unknown')}, layers={layer_indices}, "
+        f"rank={rank}, alpha={alpha:g}, parameters={lora_parameter_count(teacher):,})"
+    )
+
+
 def _freeze_teacher(teacher):
     teacher.eval()
     for p in teacher.parameters():
@@ -289,6 +351,7 @@ def _load_teacher(args):
     teacher.text_tokenizer = open_clip.get_tokenizer(model_name)
     _load_teacher_checkpoint(teacher, getattr(args, "teacher_ckpt", ""))
     _load_teacher_layernorm_checkpoint(teacher, args)
+    _load_teacher_lora_checkpoint(teacher, args, model_name, pretrained)
     teacher = _freeze_teacher(teacher)
     teacher = teacher.to(device)
     if getattr(args, "quantize_fp16", False):
@@ -588,12 +651,14 @@ class CustomCLIP(nn.Module):
             with torch.no_grad():
                 if train_photo_distill:
                     teacher_input = self.teacher_image_input(photo_aug_tensor)
+                    set_lora_modality(self.model_distill, "photo")
                     photo_aug_features = self.model_distill.encode_image(teacher_input)
                     photo_aug_features = self.adapt_teacher_feature(
                         photo_aug_features, "photo"
                     )
                 if train_sketch_distill:
                     teacher_input = self.teacher_image_input(sk_aug_tensor)
+                    set_lora_modality(self.model_distill, "sketch")
                     sk_aug_features = self.model_distill.encode_image(teacher_input)
                     sk_aug_features = self.adapt_teacher_feature(
                         sk_aug_features, "sketch"
