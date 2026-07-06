@@ -1,65 +1,19 @@
-import os
-import torch
-import numpy as np
-import random
+"""Train the ViT-B/32 CoPrompt student with DFN5B sketch-to-photo KL."""
+
 import argparse
+import random
+
+import numpy as np
+import torch
+from pytorch_lightning import Trainer
+from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
+from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
-from pytorch_lightning import Trainer 
-from pytorch_lightning.loggers import TensorBoardLogger 
-from pytorch_lightning.callbacks import ModelCheckpoint 
 
+from src.data_config import UNSEEN_CLASSES
+from src.model import IMAGE_SIZE, ZS_SBIR
 from src.sketchy_dataset import TrainDataset, ValidDataset
-from src.model import TEACHER_CHOICES, ZS_SBIR
 from src.utils import get_all_categories
-
-
-def print_run_config(args):
-    if args.distill_mode == "independent_cosine":
-        print(
-            "[Independent Cosine Distill] weights -> "
-            f"photo={args.lambda_ind_photo}, "
-            f"sketch={args.lambda_ind_sketch}, "
-            f"sketch_photo={args.lambda_ind_sketch_photo}, "
-            f"text={args.lambda_ind_text}"
-        )
-    elif args.distill_mode == "linear_infonce":
-        print(
-            "[Linear InfoNCE Distill] weights -> "
-            f"photo={args.lambda_infonce_photo}, "
-            f"sketch={args.lambda_infonce_sketch}, "
-            f"text={args.lambda_infonce_text}, "
-            f"temp={args.infonce_temperature}"
-        )
-    elif args.distill_mode == "teacher_weighted_ntxent":
-        print(
-            "[Teacher-Weighted NT-Xent] "
-            f"lambda={args.lambda_tw_ntxent}, "
-            f"alpha={args.tw_alpha}, "
-            f"temp={args.tw_temperature}"
-        )
-    else:
-        print(
-            "[KD-div Distill] weights -> "
-            f"sk_ph={getattr(args, 'lambda_rkd_sk_ph', 0.0)}, "
-            f"ph_txt={getattr(args, 'lambda_rkd_ph_txt', 0.0)}, "
-            f"sk_txt={getattr(args, 'lambda_rkd_sk_txt', 0.0)}, "
-            f"temp={getattr(args, 'rkd_temperature', 0.07)}"
-        )
-
-    print(
-        "[Loss] base weights -> "
-        f"cls={args.lambda_cls}, "
-        f"triplet={args.lambda_triplet}, "
-        f"nt_xent={args.lambda_nt_xent}"
-    )
-    print(
-        "[Run] "
-        f"dataset={args.dataset}, teacher={args.teacher}, distill_mode={args.distill_mode}, "
-        f"quantize_fp16={args.quantize_fp16}, "
-        f"teacher_ckpt={args.teacher_ckpt or 'default'}, "
-        f"teacher_adapter={args.teacher_adapter_ckpt or 'none'}, "
-        f"teacher_layernorm={args.teacher_layernorm_ckpt or 'none'}, seed={args.seed}"
-    )
 
 
 def seed_everything(seed):
@@ -77,194 +31,124 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
 
 
-def get_datasets(args):
-    seed_everything(args.seed)
-    
-    train_dataset = TrainDataset(args, args.proportion)
-    val_sketch = ValidDataset(args, mode='sketch')
-    val_photo = ValidDataset(args)
+def _loader_generator(seed):
+    return torch.Generator().manual_seed(seed)
 
-    generator = torch.Generator()
-    generator.manual_seed(args.seed)
 
-    loader_kwargs = dict(
-        num_workers=args.workers,
-        pin_memory=True,           # Transfer CPU→GPU nhanh hơn (non-blocking)
-        persistent_workers=args.workers > 0,  # Giữ worker sống giữa các epoch
-        prefetch_factor=4 if args.workers > 0 else None,  # Pre-load 4 batch trước
-        worker_init_fn=seed_worker,
-        generator=generator,
+def get_dataloaders(args):
+    train_dataset = TrainDataset(args.root, args.dataset, IMAGE_SIZE)
+    val_sketch = ValidDataset(
+        args.root,
+        args.dataset,
+        modality="sketch",
+        visualize=args.visualize,
+        image_size=IMAGE_SIZE,
     )
+    val_photo = ValidDataset(
+        args.root,
+        args.dataset,
+        modality="photo",
+        generalized=args.gzs,
+        visualize=args.visualize,
+        image_size=IMAGE_SIZE,
+    )
+
+    common = {
+        "num_workers": args.workers,
+        "pin_memory": True,
+        "persistent_workers": args.workers > 0,
+        "worker_init_fn": seed_worker,
+    }
+    if args.workers > 0:
+        common["prefetch_factor"] = 4
 
     train_loader = DataLoader(
-        dataset=train_dataset,
+        train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        drop_last=True,  # Tránh batch lẻ ở cuối gây vấn đề với RKD (cần B>=2)
-        **loader_kwargs,
+        drop_last=True,
+        generator=_loader_generator(args.seed),
+        **common,
     )
-    val_sketch_loader = DataLoader(
-        dataset=val_sketch,
+    sketch_loader = DataLoader(
+        val_sketch,
         batch_size=args.test_batch_size,
         shuffle=False,
-        **loader_kwargs,
+        generator=_loader_generator(args.seed + 1),
+        **common,
     )
-    val_photo_loader = DataLoader(
-        dataset=val_photo,
+    photo_loader = DataLoader(
+        val_photo,
         batch_size=args.test_batch_size,
         shuffle=False,
-        **loader_kwargs,
+        generator=_loader_generator(args.seed + 2),
+        **common,
     )
+    return train_loader, sketch_loader, photo_loader
 
-    return train_loader, val_sketch_loader, val_photo_loader
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=str, default="../datasets/tuberlin", help="path to dataset")
-    parser.add_argument("--ckpt_path", type=str, default="", help="path to dataset")
-    parser.add_argument("--dataset", type=str, default="tuberlin", help="type of dataset")
-    parser.add_argument("--output_dir", type=str, default="", help="output directory")
-    parser.add_argument("--backbone", type=str, default="ViT-B/32")
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--dataset", required=True, choices=sorted(UNSEEN_CLASSES))
+    parser.add_argument("--teacher_adapter_ckpt", required=True)
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--test_batch_size", type=int, default=1024)
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=4e-5)
+    parser.add_argument("--lambda_kd", type=float, default=2.5)
+    parser.add_argument("--kd_temperature", type=float, default=0.07)
     parser.add_argument("--n_ctx", type=int, default=1)
-    parser.add_argument("--img_ctx", type=int, default=2)
-    parser.add_argument("--max_size", type=int, default=224)
-    parser.add_argument(
-        "--prompt_depth",
-        type=int,
-        default=1,
-        help="Số layer inject cross-modal prompt vào visual encoder: 1=shallow (default, như code gốc), 12=tất cả layer.",
+    parser.add_argument("--lambda_cls", type=float, default=1.0)
+    parser.add_argument("--lambda_triplet", type=float, default=1.0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--progress", action="store_true")
+    parser.add_argument("--visualize", action="store_true")
+    parser.add_argument("--gzs", action="store_true")
+    parser.add_argument("--exp_name", default="coprompt_dfn5b_kd")
+    return parser.parse_args(argv)
+
+
+def main():
+    args = parse_args()
+    if args.lambda_kd <= 0:
+        raise ValueError("--lambda_kd must be positive in the cleaned KD pipeline.")
+    if args.kd_temperature <= 0:
+        raise ValueError("--kd_temperature must be positive.")
+
+    seed_everything(args.seed)
+    print(
+        "[Run] DFN5B residual adapter -> ViT-B/32 student | "
+        f"dataset={args.dataset}, batch={args.batch_size}, lr={args.lr}, "
+        f"kd={args.lambda_kd}, temp={args.kd_temperature}, seed={args.seed}"
     )
-    parser.add_argument("--use_classes", type=int, default=104)
-    parser.add_argument("--data_split", type=int, default=-1)
-    parser.add_argument("--prec", type=str, default="fp16")
-    parser.add_argument("--temperature", type=float, default=0.07)
-    parser.add_argument("--proportion", type=float, default=1.0)
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
-    parser.add_argument("--lambda_cls", type=float, default=1.0,
-                        help="Trọng số cho classification loss: CE(photo,text)+CE(sketch,text).")
-    parser.add_argument("--lambda_triplet", type=float, default=1.0,
-                        help="Trọng số cho triplet loss sketch-photo-negative.")
-    parser.add_argument("--lambda_nt_xent", type=float, default=1.0,
-                        help="Trọng số cho NT-Xent loss giữa photo và sketch student.")
-    
-    parser.add_argument("--lr", type=float, default=2e-5)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--test_batch_size', type=int, default=1024)
-    parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--workers', type=int, default=2)
-    parser.add_argument('--use_co_sk', type=bool, default=True)
-    parser.add_argument('--use_co_ph', type=bool, default=True)
-    parser.add_argument('--progress', action='store_true', default=False,
-                        help='Hiện tqdm progress bar trong lúc train')
-    parser.add_argument('--no_aug', action='store_true', default=False,
-                        help='Tắt augmentation cho photo_aug/sketch_aug, dùng transform thường.')
-    parser.add_argument('--visualize', action='store_true', default=False)
-    parser.add_argument('--gzs', action='store_true', default=False)
-    parser.add_argument('--teacher', type=str, default='clip32',
-                        choices=TEACHER_CHOICES,
-                        help=(
-                            "Teacher model cho distillation:\n"
-                            "  clip32 → không dùng strong teacher\n"
-                            "  dfn5b, laion_h"
-                        ))
-    parser.add_argument('--quantize_fp16', action='store_true', default=False,
-                        help='Chạy strong teacher dfn5b ở FP16 để giảm VRAM và tăng tốc.')
-    parser.add_argument('--teacher_ckpt', type=str, default='',
-                        help='Đường dẫn checkpoint để load weight cho strong teacher dfn5b.')
-    parser.add_argument('--teacher_adapter_ckpt', type=str, default='',
-                        help='Checkpoint modality adapter đã fine-tune cho strong teacher.')
-    parser.add_argument('--teacher_layernorm_ckpt', type=str, default='',
-                        help='Checkpoint LayerNorm-only đã fine-tune cho strong teacher.')
-    parser.add_argument('--distill_mode', type=str, default='kd_div',
-                        choices=['kd_div', 'linear_infonce', 'teacher_weighted_ntxent', 'independent_cosine'],
-                        help='Chọn phương pháp distill: kd_div, linear_infonce, teacher_weighted_ntxent, hoặc independent_cosine.')
-    parser.add_argument('--use_rkd', action='store_true', default=False,
-                        help=argparse.SUPPRESS)
-    parser.add_argument('--lambda_rkd_sk_ph', type=float, default=0.0,
-                        help='Trọng số KD-div cho ma trận quan hệ Sketch-Photo.')
-    parser.add_argument('--lambda_rkd_ph_txt', type=float, default=0.0,
-                        help='Trọng số KD-div cho ma trận quan hệ Photo-Text.')
-    parser.add_argument('--lambda_rkd_sk_txt', type=float, default=0.0,
-                        help='Trọng số KD-div cho ma trận quan hệ Sketch-Text.')
-    parser.add_argument('--rkd_temperature', type=float, default=0.07,
-                        help='Temperature cho KD-div similarity distribution.')
-    parser.add_argument('--lambda_infonce_photo', type=float, default=0.0,
-                        help='Trọng số linear InfoNCE giữa student photo và teacher photo.')
-    parser.add_argument('--lambda_infonce_sketch', type=float, default=0.0,
-                        help='Trọng số linear InfoNCE giữa student sketch và teacher sketch.')
-    parser.add_argument('--lambda_infonce_text', type=float, default=0.0,
-                        help='Trọng số linear InfoNCE giữa student text prompts và teacher text.')
-    parser.add_argument('--infonce_temperature', type=float, default=0.07,
-                        help='Temperature cho linear InfoNCE distillation.')
-    parser.add_argument('--lambda_tw_ntxent', type=float, default=0.0,
-                        help='Trọng số Teacher-Weighted NT-Xent giữa sketch-photo student theo phân phối teacher.')
-    parser.add_argument('--tw_alpha', type=float, default=0.3,
-                        help='Mức trộn teacher soft target trong Teacher-Weighted NT-Xent, 0=NT-Xent cứng, 1=theo teacher hoàn toàn.')
-    parser.add_argument('--tw_temperature', type=float, default=0.08,
-                        help='Temperature cho Teacher-Weighted NT-Xent.')
-    parser.add_argument('--lambda_ind_photo', type=float, default=0.0,
-                        help='Trọng số cosine distill độc lập: student photo -> teacher photo.')
-    parser.add_argument('--lambda_ind_sketch', type=float, default=0.0,
-                        help='Trọng số cosine distill độc lập: student sketch -> teacher sketch.')
-    parser.add_argument('--lambda_ind_sketch_photo', type=float, default=0.0,
-                        help='Trọng số cosine distill độc lập: student sketch -> teacher positive photo.')
-    parser.add_argument('--lambda_ind_text', type=float, default=0.0,
-                        help='Trọng số cosine distill độc lập: student text prompt -> teacher text.')
-                        
-    parser.add_argument('--exp_name', type=str, default='Co_prompt')
+    train_loader, sketch_loader, photo_loader = get_dataloaders(args)
+    classnames = get_all_categories(args)
+    model = ZS_SBIR(args=args, classname=classnames)
 
-
-    
-    args = parser.parse_args()
-    print_run_config(args)
-    logger = TensorBoardLogger('tb_logs', name=args.exp_name)
-    
+    logger = TensorBoardLogger("tb_logs", name=args.exp_name)
     checkpoint_callback = ModelCheckpoint(
-        monitor='mAP',
-        dirpath='saved_models/%s'%args.exp_name,
+        monitor="mAP",
+        dirpath=f"saved_models/{args.exp_name}",
         filename="{epoch:02d}-{mAP:.4f}",
         save_top_k=1,
-        mode='max',
-        save_last=True)
-    
-    ckpt_path = args.ckpt_path
-    if not os.path.exists(ckpt_path):
-        ckpt_path = None
-    else:
-        print ('resuming training from %s'%ckpt_path)
-
-    train_loader, val_sketch_loader, val_photo_loader = get_datasets(args)
-    from pytorch_lightning.callbacks import TQDMProgressBar
-    progress_bar = TQDMProgressBar(refresh_rate=20)
-
-    trainer = Trainer(accelerator='gpu', devices=1, 
-        min_epochs=1, max_epochs=args.epochs,
+        mode="max",
+        save_last=True,
+    )
+    trainer = Trainer(
+        accelerator="gpu",
+        devices=1,
+        min_epochs=1,
+        max_epochs=args.epochs,
         benchmark=True,
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=args.progress,
-        callbacks=[checkpoint_callback, progress_bar]
+        callbacks=[checkpoint_callback, TQDMProgressBar(refresh_rate=20)],
     )
+    trainer.fit(model, train_loader, [sketch_loader, photo_loader])
 
-    classnames = get_all_categories(args)
- 
-    if ckpt_path is None:
-        model = ZS_SBIR(args=args, classname=classnames)
-    else:
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-        sd = ckpt["state_dict"]
 
-        skip = [
-            "model.prompt_learner_photo.token_prefix",
-            "model.prompt_learner_photo.token_suffix",
-            "model.prompt_learner_sketch.token_prefix",
-            "model.prompt_learner_sketch.token_suffix",
-        ]
-        for k in skip:
-            sd.pop(k, None)
-
-        model = ZS_SBIR(args=args, classname=classnames)  # classnames = 220
-        missing, unexpected = model.load_state_dict(sd, strict=False)
-
-    trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
+if __name__ == "__main__":
+    main()
