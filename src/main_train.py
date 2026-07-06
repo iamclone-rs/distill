@@ -37,6 +37,14 @@ def print_run_config(args):
             f"alpha={args.tw_alpha}, "
             f"temp={args.tw_temperature}"
         )
+    elif args.distill_mode == "std_kd":
+        print(
+            "[Standardized KD] weights -> "
+            f"sk_ph={args.lambda_rkd_sk_ph}, "
+            f"ph_txt={args.lambda_rkd_ph_txt}, "
+            f"sk_txt={args.lambda_rkd_sk_txt}, "
+            f"temp={args.std_kd_temperature}"
+        )
     else:
         print(
             "[KD-div Distill] weights -> "
@@ -177,8 +185,8 @@ if __name__ == "__main__":
     parser.add_argument('--teacher_layernorm_ckpt', type=str, default='',
                         help='Checkpoint LayerNorm-only đã fine-tune cho strong teacher.')
     parser.add_argument('--distill_mode', type=str, default='kd_div',
-                        choices=['kd_div', 'linear_infonce', 'teacher_weighted_ntxent', 'independent_cosine'],
-                        help='Chọn phương pháp distill: kd_div, linear_infonce, teacher_weighted_ntxent, hoặc independent_cosine.')
+                        choices=['kd_div', 'std_kd', 'linear_infonce', 'teacher_weighted_ntxent', 'independent_cosine'],
+                        help='Chọn phương pháp distill: kd_div, std_kd, linear_infonce, teacher_weighted_ntxent, hoặc independent_cosine.')
     parser.add_argument('--use_rkd', action='store_true', default=False,
                         help=argparse.SUPPRESS)
     parser.add_argument('--lambda_rkd_sk_ph', type=float, default=0.0,
@@ -189,6 +197,8 @@ if __name__ == "__main__":
                         help='Trọng số KD-div cho ma trận quan hệ Sketch-Text.')
     parser.add_argument('--rkd_temperature', type=float, default=0.07,
                         help='Temperature cho KD-div similarity distribution.')
+    parser.add_argument('--std_kd_temperature', type=float, default=1.0,
+                        help='Temperature sau khi z-score từng hàng similarity trong Standardized KD.')
     parser.add_argument('--lambda_infonce_photo', type=float, default=0.0,
                         help='Trọng số linear InfoNCE giữa student photo và teacher photo.')
     parser.add_argument('--lambda_infonce_sketch', type=float, default=0.0,

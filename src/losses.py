@@ -52,6 +52,74 @@ def add_kd_div(loss_distill, loss_dict, name, weight, student_feat1, student_fea
     return loss_distill
 
 
+def _standardize_similarity(logits, eps=1e-6):
+    mean = logits.mean(dim=-1, keepdim=True)
+    std = logits.std(dim=-1, keepdim=True, unbiased=False).clamp_min(eps)
+    return (logits - mean) / std
+
+
+def standardized_kd_div_loss(
+    student_feat1,
+    student_feat2,
+    teacher_feat1,
+    teacher_feat2,
+    temperature=1.0,
+):
+    """KL on row-wise standardized cosine-similarity logits."""
+    if temperature <= 0:
+        raise ValueError("Standardized KD temperature must be positive.")
+    student_device = student_feat1.device
+    s1 = F.normalize(student_feat1.float(), dim=-1)
+    s2 = F.normalize(
+        student_feat2.to(device=student_device, dtype=torch.float32), dim=-1
+    )
+    sim_s = _standardize_similarity(s1 @ s2.t()) / temperature
+    log_p_s = F.log_softmax(sim_s, dim=-1)
+
+    with torch.no_grad():
+        t1 = F.normalize(
+            teacher_feat1.to(device=student_device, dtype=torch.float32), dim=-1
+        )
+        t2 = F.normalize(
+            teacher_feat2.to(device=student_device, dtype=torch.float32), dim=-1
+        )
+        sim_t = _standardize_similarity(t1 @ t2.t()) / temperature
+        p_t = F.softmax(sim_t, dim=-1)
+
+    return F.kl_div(log_p_s, p_t, reduction="batchmean")
+
+
+def add_standardized_kd(
+    loss_distill,
+    loss_dict,
+    name,
+    weight,
+    student_feat1,
+    student_feat2,
+    teacher_feat1,
+    teacher_feat2,
+    temperature,
+):
+    if (
+        weight <= 0
+        or student_feat1 is None
+        or student_feat2 is None
+        or teacher_feat1 is None
+        or teacher_feat2 is None
+    ):
+        return loss_distill
+    loss_value = standardized_kd_div_loss(
+        student_feat1,
+        student_feat2,
+        teacher_feat1,
+        teacher_feat2,
+        temperature,
+    )
+    loss_distill = loss_distill + weight * loss_value
+    loss_dict[name] = loss_value
+    return loss_distill
+
+
 def infonce_distill_loss(student_feat, teacher_feat, temperature=0.07):
     teacher_feat = teacher_feat.to(dtype=student_feat.dtype, device=student_feat.device)
     student_feat = F.normalize(student_feat, dim=1)
@@ -238,6 +306,41 @@ def loss_fn(args, model, features, mode='train'):
             loss_distill,
             loss_dict,
             "kd_sk_txt",
+            getattr(args, "lambda_rkd_sk_txt", 0.0),
+            sk_distill_features,
+            sk_text_distill_features,
+            sk_aug_features,
+            teacher_text_features,
+            temp,
+        )
+    elif distill_mode == "std_kd":
+        temp = getattr(args, "std_kd_temperature", 1.0)
+        loss_distill = add_standardized_kd(
+            loss_distill,
+            loss_dict,
+            "skd_sk_ph",
+            getattr(args, "lambda_rkd_sk_ph", 0.0),
+            sk_distill_features,
+            photo_distill_features,
+            sk_aug_features,
+            photo_aug_features,
+            temp,
+        )
+        loss_distill = add_standardized_kd(
+            loss_distill,
+            loss_dict,
+            "skd_ph_txt",
+            getattr(args, "lambda_rkd_ph_txt", 0.0),
+            photo_distill_features,
+            photo_text_distill_features,
+            photo_aug_features,
+            teacher_text_features,
+            temp,
+        )
+        loss_distill = add_standardized_kd(
+            loss_distill,
+            loss_dict,
+            "skd_sk_txt",
             getattr(args, "lambda_rkd_sk_txt", 0.0),
             sk_distill_features,
             sk_text_distill_features,
