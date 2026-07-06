@@ -199,7 +199,12 @@ def parse_args():
     parser.add_argument("--dataset", default="sketchy_2", choices=sorted(UNSEEN_CLASSES))
     parser.add_argument("--model", default="ViT-H-14")
     parser.add_argument("--pretrained", default="laion2b_s32b_b79k")
-    parser.add_argument("--adapter_ckpt", required=True)
+    parser.add_argument(
+        "--adapter_ckpt",
+        default="",
+        help="Optional adapter checkpoint used for initialization.",
+    )
+    parser.add_argument("--bottleneck_dim", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--eval_batch_size", type=int, default=64)
@@ -308,13 +313,24 @@ def main():
         )
     )
 
-    adapters, adapter_checkpoint = load_adapter(
-        args.adapter_ckpt,
-        args.model,
-        args.pretrained,
-        output_dim,
-        device,
-    )
+    if args.adapter_ckpt:
+        adapters, adapter_checkpoint = load_adapter(
+            args.adapter_ckpt,
+            args.model,
+            args.pretrained,
+            output_dim,
+            device,
+        )
+        adapter_source = (
+            f"{args.adapter_ckpt} (epoch="
+            f"{adapter_checkpoint.get('epoch', 'unknown')})"
+        )
+    else:
+        adapters = ModalityAdapters(
+            feature_dim=output_dim,
+            bottleneck_dim=args.bottleneck_dim,
+        ).to(device=device, dtype=torch.float32)
+        adapter_source = "new identity-initialized adapter"
     adapter_count = sum(parameter.numel() for parameter in adapters.parameters())
     adapters.requires_grad_(not args.freeze_adapter)
     lora_count = lora_parameter_count(model)
@@ -331,8 +347,8 @@ def main():
     print(
         f"Output adapter={adapter_count:,} "
         f"({'frozen' if args.freeze_adapter else f'trainable, lr={args.adapter_lr:g}'}); "
-        f"total PEFT storage={adapter_count + lora_count:,}. Adapter source epoch="
-        f"{adapter_checkpoint.get('epoch', 'unknown')}"
+        f"total PEFT storage={adapter_count + lora_count:,}. "
+        f"Adapter source={adapter_source}"
     )
 
     train_transform = preprocess_train if args.train_augmentation else preprocess_val
