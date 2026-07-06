@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
 from src.data_config import UNSEEN_CLASSES
-from src.eval_teacher import (
+from src.eval_laion_sketchy import (
     IMAGE_EXTENSIONS,
     classification_metrics,
     encode_images,
