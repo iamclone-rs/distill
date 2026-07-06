@@ -389,7 +389,7 @@ class CustomCLIP(nn.Module):
             or lambda_ind_sketch > 0
             or lambda_ind_sketch_photo > 0
         )
-        if self._distill_mode in ("kd_div", "std_kd"):
+        if self._distill_mode == "kd_div":
             self._image_distill_active = self._kd_image_distill_active
             self._need_teacher_text = lambda_rkd_ph_txt > 0 or lambda_rkd_sk_txt > 0
         elif self._distill_mode == "linear_infonce":
@@ -425,14 +425,6 @@ class CustomCLIP(nn.Module):
                 f"sk_ph={lambda_rkd_sk_ph > 0} ({lambda_rkd_sk_ph}), "
                 f"ph_txt={lambda_rkd_ph_txt > 0} ({lambda_rkd_ph_txt}), "
                 f"sk_txt={lambda_rkd_sk_txt > 0} ({lambda_rkd_sk_txt})"
-            )
-        elif self._distill_mode == "std_kd":
-            print(
-                "[Standardized KD] active branches -> "
-                f"sk_ph={lambda_rkd_sk_ph > 0} ({lambda_rkd_sk_ph}), "
-                f"ph_txt={lambda_rkd_ph_txt > 0} ({lambda_rkd_ph_txt}), "
-                f"sk_txt={lambda_rkd_sk_txt > 0} ({lambda_rkd_sk_txt}), "
-                f"temp={getattr(cfg, 'std_kd_temperature', 1.0)}"
             )
         elif self._distill_mode == "linear_infonce":
             print(
@@ -569,7 +561,7 @@ class CustomCLIP(nn.Module):
         )
         _, neg_feature, neg_raw_feature = self.get_logits(neg_tensor, classnames)
         
-        if self._distill_mode in ("kd_div", "std_kd"):
+        if self._distill_mode == "kd_div":
             lambda_rkd_sk_ph = getattr(self.cfg, "lambda_rkd_sk_ph", 0.0)
             lambda_rkd_ph_txt = getattr(self.cfg, "lambda_rkd_ph_txt", 0.0)
             lambda_rkd_sk_txt = getattr(self.cfg, "lambda_rkd_sk_txt", 0.0)
@@ -854,16 +846,12 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             show_on_bar = (
                 k.startswith('kd_')
-                or k.startswith('skd_')
                 or k.startswith('infonce_')
                 or k.startswith('tw_')
                 or k.startswith('ind_')
             )
             bar_name = (
-                k.replace("skd_sk_ph", "SKD_SP")
-                .replace("skd_ph_txt", "SKD_PT")
-                .replace("skd_sk_txt", "SKD_ST")
-                .replace("kd_sk_ph", "KD_SP")
+                k.replace("kd_sk_ph", "KD_SP")
                 .replace("kd_ph_txt", "KD_PT")
                 .replace("kd_sk_txt", "KD_ST")
                 .replace("infonce_photo_text", "I_PT")
