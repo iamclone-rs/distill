@@ -209,7 +209,7 @@ def parse_args():
     parser.add_argument("--lora_layers", type=int, default=4)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--adapter_lr", type=float, default=1e-5)
+    parser.add_argument("--adapter_lr", type=float, default=1e-4)
     parser.add_argument("--freeze_adapter", action="store_true", default=False)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--temperature", type=float, default=0.07)
