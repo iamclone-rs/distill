@@ -488,7 +488,7 @@ class ZS_SBIR(pl.LightningModule):
         self._grad_debug_printed = True
     
     def validation_step(self, batch, batch_idx, dataloader_idx):
-        classnames = get_all_categories(self.args, mode="train")
+        classnames = get_all_categories(self.args)
         image_tensor, label = batch
         if dataloader_idx == 0:
             feat = self.model.extract_feature(image_tensor, classname=classnames, type='sketch')
