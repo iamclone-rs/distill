@@ -30,10 +30,22 @@ def _freeze_teacher(teacher):
 
 def _load_teacher_adapters(args, strong_teacher):
     ckpt_path = getattr(args, "teacher_adapter_ckpt", "")
+    joint_training = getattr(args, "joint_teacher_adapter", False)
     if not ckpt_path:
-        return None
+        if not joint_training:
+            return None
+        adapters = ModalityAdapters(
+            feature_dim=int(strong_teacher.output_dim),
+            bottleneck_dim=args.teacher_adapter_bottleneck,
+        ).to(device=device, dtype=torch.float32)
+        print(
+            "[Teacher Adapter] initialized for joint training "
+            f"(feature_dim={strong_teacher.output_dim}, "
+            f"bottleneck={args.teacher_adapter_bottleneck})"
+        )
+        return adapters
     if strong_teacher is None:
-        raise ValueError("--teacher_adapter_ckpt requires a strong teacher, not teacher=clip32.")
+        raise ValueError("--teacher_adapter_ckpt requires the DFN5B teacher.")
 
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     required = {"adapter_state_dict", "feature_dim", "bottleneck_dim"}
@@ -69,13 +81,15 @@ def _load_teacher_adapters(args, strong_teacher):
         bottleneck_dim=int(checkpoint["bottleneck_dim"]),
     )
     adapters.load_state_dict(checkpoint["adapter_state_dict"], strict=True)
-    adapters.eval().requires_grad_(False)
+    adapters.requires_grad_(joint_training)
+    adapters.train(joint_training)
     adapters = adapters.to(device=device, dtype=torch.float32)
     print(
         f"[Teacher Adapter] loaded {ckpt_path} "
         f"(epoch={checkpoint.get('epoch', 'unknown')}, feature_dim={feature_dim}, "
         f"bottleneck={checkpoint['bottleneck_dim']}, "
-        f"mode={checkpoint.get('adapter_mode', 'residual')})"
+        f"mode={checkpoint.get('adapter_mode', 'residual')}, "
+        f"trainable={joint_training})"
     )
     return adapters
 
@@ -98,14 +112,15 @@ def _infer_teacher_image_size(teacher):
 
 def _load_teacher(args):
     """Load the frozen DFN5B teacher when relational KD is enabled."""
-    if args.lambda_kd <= 0:
-        print("[Teacher] lambda_kd=0 -> bỏ qua DFN5B teacher")
+    if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
+        print("[Teacher] KD và joint adapter đều tắt -> bỏ qua DFN5B teacher")
         return None
 
     print(f"[Teacher] Đang load DFN5B ({DFN5B_MODEL})...")
     teacher, _, _ = open_clip.create_model_and_transforms(
         DFN5B_MODEL, pretrained=DFN5B_PRETRAINED
     )
+    teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
     teacher = _freeze_teacher(teacher)
     teacher = teacher.to(device)
     if getattr(args, "quantize_fp16", False):
@@ -151,7 +166,9 @@ class CustomCLIP(nn.Module):
         
         self.model_distill = strong_teacher
         self.teacher_active = strong_teacher is not None
+        self.joint_teacher_adapter = getattr(cfg, "joint_teacher_adapter", False)
         self.teacher_adapters = _load_teacher_adapters(cfg, strong_teacher)
+        self._teacher_text_cache = {}
         self._teacher_fp16 = (
             self.teacher_active
             and getattr(cfg, "quantize_fp16", False)
@@ -162,6 +179,14 @@ class CustomCLIP(nn.Module):
             f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
             f"temperature={cfg.kd_temperature}"
         )
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.model_distill is not None:
+            self.model_distill.eval()
+        if self.teacher_adapters is not None:
+            self.teacher_adapters.train(mode and self.joint_teacher_adapter)
+        return self
     
     def teacher_image_input(self, image):
         teacher_size = getattr(self.model_distill, "image_size", None)
@@ -184,6 +209,32 @@ class CustomCLIP(nn.Module):
             else self.teacher_adapters.sketch
         )
         return adapter(feature)
+
+    def get_teacher_text_features(self, classnames):
+        cache_key = tuple(classnames)
+        if cache_key in self._teacher_text_cache:
+            return self._teacher_text_cache[cache_key]
+
+        sketch_prompts = [
+            f"a sketch of a {name.replace('_', ' ')}." for name in classnames
+        ]
+        photo_prompts = [
+            f"a photo of a {name.replace('_', ' ')}." for name in classnames
+        ]
+        tokens = self.model_distill.text_tokenizer(
+            sketch_prompts + photo_prompts
+        ).to(device)
+        with torch.no_grad():
+            text_features = F.normalize(
+                self.model_distill.encode_text(tokens).float(), dim=-1
+            )
+        class_count = len(classnames)
+        result = (
+            text_features[:class_count],
+            text_features[class_count:],
+        )
+        self._teacher_text_cache[cache_key] = result
+        return result
 
     def get_logits(self, img_tensor, classnames, type='photo'):
         if type=='photo':
@@ -223,19 +274,25 @@ class CustomCLIP(nn.Module):
 
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
+        teacher_sketch_text = None
+        teacher_photo_text = None
         if self.teacher_active:
             with torch.no_grad():
-                teacher_photo_features = self.model_distill.encode_image(
+                teacher_photo_base = self.model_distill.encode_image(
                     self.teacher_image_input(photo_aug_tensor)
                 )
-                teacher_sketch_features = self.model_distill.encode_image(
+                teacher_sketch_base = self.model_distill.encode_image(
                     self.teacher_image_input(sk_aug_tensor)
                 )
-                teacher_photo_features = self.adapt_teacher_feature(
-                    teacher_photo_features, "photo"
-                )
-                teacher_sketch_features = self.adapt_teacher_feature(
-                    teacher_sketch_features, "sketch"
+            teacher_photo_features = self.adapt_teacher_feature(
+                teacher_photo_base, "photo"
+            )
+            teacher_sketch_features = self.adapt_teacher_feature(
+                teacher_sketch_base, "sketch"
+            )
+            if self.joint_teacher_adapter:
+                teacher_sketch_text, teacher_photo_text = (
+                    self.get_teacher_text_features(classnames)
                 )
 
         return (
@@ -248,6 +305,9 @@ class CustomCLIP(nn.Module):
             pos_logits,
             sk_logits,
             self.teacher_active,
+            self.joint_teacher_adapter,
+            teacher_sketch_text,
+            teacher_photo_text,
         )
         
     def extract_feature(self, image, classname, type='photo'):
@@ -406,22 +466,47 @@ class ZS_SBIR(pl.LightningModule):
         self._print_module_param_row("text_encoder", self.model.text_encoder)
         if self.model.model_distill is not None:
             self._print_module_param_row("model_distill", self.model.model_distill)
+        if self.model.teacher_adapters is not None:
+            self._print_module_param_row("teacher_adapters", self.model.teacher_adapters)
         total_trainable = _count_params(self.model, trainable_only=True)
         print(f"[CoPrompt Debug] Total trainable params: {_fmt_params(total_trainable)}")
         print(
             "[CoPrompt Debug] Loss weights: "
             f"cls={getattr(self.args, 'lambda_cls', 1.0)}, "
             f"triplet={getattr(self.args, 'lambda_triplet', 1.0)}, "
-            f"kd_sketch_photo={self.args.lambda_kd}"
+            f"kd_sketch_photo={self.args.lambda_kd}, "
+            f"teacher_retrieval={self.args.lambda_teacher_retrieval}, "
+            f"teacher_semantic={self.args.lambda_teacher_semantic}"
         )
         print("=" * 78)
         
     def configure_optimizers(self):
-        optimizer = torch.optim.SGD(params=self.model.parameters(), lr=self.args.lr, weight_decay=1e-3, momentum=0.9)
+        adapter_params = (
+            [p for p in self.model.teacher_adapters.parameters() if p.requires_grad]
+            if self.model.teacher_adapters is not None
+            else []
+        )
+        adapter_param_ids = {id(p) for p in adapter_params}
+        student_params = [
+            p for p in self.model.parameters()
+            if p.requires_grad and id(p) not in adapter_param_ids
+        ]
+        param_groups = [{"params": student_params, "lr": self.args.lr}]
+        if adapter_params:
+            param_groups.append(
+                {"params": adapter_params, "lr": self.args.teacher_adapter_lr}
+            )
+        optimizer = torch.optim.SGD(
+            params=param_groups,
+            lr=self.args.lr,
+            weight_decay=1e-3,
+            momentum=0.9,
+        )
         trainable = sum(p.numel() for group in optimizer.param_groups for p in group["params"] if p.requires_grad)
         print(
             "[CoPrompt Debug] Optimizer: SGD "
             f"lr={self.args.lr}, momentum=0.9, weight_decay=1e-3, "
+            f"teacher_adapter_lr={self.args.teacher_adapter_lr if adapter_params else 'off'}, "
             f"trainable_params={_fmt_params(trainable)}"
         )
         
@@ -454,6 +539,9 @@ class ZS_SBIR(pl.LightningModule):
                 "photo_logits",
                 "sketch_logits",
                 "teacher_active",
+                "joint_teacher_adapter",
+                "teacher_sketch_text",
+                "teacher_photo_text",
             ]
             print("=" * 78)
             print("[CoPrompt Debug] First train batch feature contract")
@@ -465,8 +553,13 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
-            show_on_bar = k == "kd_sketch_photo"
-            bar_name = "KD_SP" if show_on_bar else k
+            bar_names = {
+                "kd_sketch_photo": "KD_SP",
+                "teacher_retrieval": "T_RET",
+                "teacher_semantic": "T_SEM",
+            }
+            show_on_bar = k in bar_names
+            bar_name = bar_names.get(k, k)
             self.log(bar_name, v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
         return loss
 
@@ -484,6 +577,8 @@ class ZS_SBIR(pl.LightningModule):
         self._print_grad_row("text_encoder", self.model.text_encoder)
         if self.model.model_distill is not None:
             self._print_grad_row("model_distill", self.model.model_distill)
+        if self.model.teacher_adapters is not None:
+            self._print_grad_row("teacher_adapters", self.model.teacher_adapters)
         print("=" * 78)
         self._grad_debug_printed = True
     

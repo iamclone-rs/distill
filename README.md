@@ -63,3 +63,21 @@ python -m src.main_train \
 
 The recorded Sketchy-1 configuration uses `lambda_kd=3`, `n_ctx=1`, seed 42,
 and selects the best student checkpoint by unseen `mAP@all`.
+
+## Joint teacher-adapter ablation
+
+On branch `ablation/joint-teacher-adapter`, omit `--teacher_adapter_ckpt` and
+add the following flags to `src.main_train`:
+
+```bash
+--joint_teacher_adapter \
+--teacher_adapter_bottleneck 32 \
+--teacher_adapter_lr 1e-4 \
+--lambda_teacher_retrieval 1 \
+--lambda_teacher_semantic 0.5 \
+--teacher_temperature 0.07
+```
+
+DFN5B remains frozen. Its sketch/photo adapters are optimized jointly with
+the student using multi-positive retrieval and semantic classification losses;
+relational KD updates only the student.
