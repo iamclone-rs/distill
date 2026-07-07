@@ -2,10 +2,9 @@ import os
 import glob
 import numpy as np
 import torch
-import random
 from torchvision import transforms
 from PIL import Image, ImageOps
-from src.data_config import UNSEEN_CLASSES, GENERALIZED_CLASSES, VISUALIZE_CLASSES
+from src.data_config import UNSEEN_CLASSES
 
 CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
 CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
@@ -29,38 +28,22 @@ def normal_transform():
     return dataset_transforms
 
 class TrainDataset(torch.utils.data.Dataset):
-    def __init__(self, args, proportion=1.0):
+    def __init__(self, args):
         self.args = args
-        self.proportion = proportion
         self.transform1 = normal_transform()
-        self.transform2 = normal_transform() if getattr(args, "no_aug", False) else aumented_transform()
+        self.transform2 = aumented_transform()
         
         unseen_classes = UNSEEN_CLASSES[self.args.dataset]
 
         self.all_categories = os.listdir(os.path.join(self.args.root, 'sketch'))
         self.all_categories = sorted(list(set(self.all_categories) - set(unseen_classes)))
         
-        if self.args.use_classes != 104:
-            required_classes = list(GENERALIZED_CLASSES[self.args.dataset])
-            other_classes = [c for c in self.all_categories if c not in required_classes]
-            num_extra = self.args.use_classes - len(required_classes)
-            extra_classes = random.sample(other_classes, num_extra)
-            
-            self.all_categories = sorted(required_classes + extra_classes)
-
         self.all_sketches_path = []
         self.all_photos_path = {}
 
         for category in self.all_categories:
             sketch_paths = glob.glob(os.path.join(self.args.root, 'sketch', category, '*'))
             photo_paths = glob.glob(os.path.join(self.args.root, 'photo', category, '*'))
-            
-            if self.proportion != 1:
-                num_sketch = max(1, int(len(sketch_paths) * self.proportion))
-                num_photo  = max(1, int(len(photo_paths) * self.proportion))
-                
-                sketch_paths = random.sample(sketch_paths, num_sketch)
-                photo_paths = random.sample(photo_paths, num_photo)
             
             self.all_sketches_path.extend(sketch_paths)
             self.all_photos_path[category] = photo_paths
@@ -90,9 +73,6 @@ class TrainDataset(torch.utils.data.Dataset):
         sk_aug_tensor = self.transform2(sk_data)
         img_aug_tensor = self.transform2(img_data)
         
-        # sk_aug_tensor = self.transform1(sk_data)
-        # img_aug_tensor = self.transform1(img_data)
-        
         return img_tensor, sk_tensor, img_aug_tensor, sk_aug_tensor, neg_tensor, self.all_categories.index(category)
 
 
@@ -102,16 +82,7 @@ class ValidDataset(torch.utils.data.Dataset):
         self.args = args
         self.mode = mode
         self.transform = normal_transform()
-        self.gzs_perc = 0.2
-        self.seed = 42
-        
-        self.global_categories = os.listdir(os.path.join(self.args.root, 'sketch'))
-        
-        if self.args.visualize:
-            self.unseen_classes = VISUALIZE_CLASSES[self.args.dataset]
-            # self.unseen_classes = UNSEEN_CLASSES[self.args.dataset]
-        else:
-            self.unseen_classes = UNSEEN_CLASSES[self.args.dataset]
+        self.unseen_classes = UNSEEN_CLASSES[self.args.dataset]
             
         unseen_paths = []
         for category in self.unseen_classes:
@@ -122,12 +93,6 @@ class ValidDataset(torch.utils.data.Dataset):
 
         self.paths = list(unseen_paths)
 
-        if self.mode == 'photo':
-            if self.args.gzs:
-                generalized_classes = GENERALIZED_CLASSES[self.args.dataset]
-                for category in generalized_classes:
-                    self.paths.extend(glob.glob(os.path.join(self.args.root, 'photo', category, '*')))
-            
     def __getitem__(self, index):
         filepath = self.paths[index]                
         category = filepath.split(os.path.sep)[-2]

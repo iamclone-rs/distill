@@ -118,37 +118,3 @@ UNSEEN_CLASSES = {
         "tv",
     ],
 }
-
-GENERALIZED_CLASSES = {
-    "sketchy_2": {
-        "teapot",
-        "harp",
-        "piano",
-        "trumpet",
-        "saxophone",
-        "hourglass",
-        "mushroom",
-        "pretzel",
-        "bell"
-    },
-    
-    "tuberlin": {
-        "airplane",
-        "blimp",
-        "tablelamp",
-        "telephone",
-        "human-skeleton",
-        "pickup truck"
-    }
-}
-
-VISUALIZE_CLASSES = {
-    "sketchy_2": [
-        "cow",
-        "raccoon",
-        "scissors",
-        "seagull",
-        "sword",
-        "tree",
-    ],
-}

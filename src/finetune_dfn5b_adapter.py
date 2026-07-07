@@ -1,4 +1,4 @@
-"""Lightweight modality-adapter fine-tuning for an OpenCLIP teacher on SBIR data.
+"""Lightweight modality-adapter fine-tuning for the DFN5B SBIR teacher.
 
 This follows the repository protocol: train on all seen classes, validate on
 unseen classes after every epoch, and select the best checkpoint by unseen mAP.
@@ -30,6 +30,9 @@ from src.eval_laion_sketchy import (
     retrieval_at_k,
     resolve_metric_config,
 )
+
+DFN5B_MODEL = "ViT-H-14-quickgelu"
+DFN5B_PRETRAINED = "dfn5b"
 
 
 class PathDataset(Dataset):
@@ -73,34 +76,26 @@ class FeaturePairDataset(Dataset):
 
 
 class ResidualAdapter(nn.Module):
-    def __init__(self, feature_dim, bottleneck_dim=64, adapter_mode="residual"):
+    def __init__(self, feature_dim, bottleneck_dim=32):
         super().__init__()
-        if adapter_mode not in ("residual", "non_residual"):
-            raise ValueError(f"Unknown adapter_mode: {adapter_mode}")
-        self.adapter_mode = adapter_mode
         self.norm = nn.LayerNorm(feature_dim)
         self.down = nn.Linear(feature_dim, bottleneck_dim)
         self.up = nn.Linear(bottleneck_dim, feature_dim)
         nn.init.xavier_uniform_(self.down.weight)
         nn.init.zeros_(self.down.bias)
-        if adapter_mode == "residual":
-            nn.init.zeros_(self.up.weight)
-        else:
-            nn.init.xavier_uniform_(self.up.weight)
+        nn.init.zeros_(self.up.weight)
         nn.init.zeros_(self.up.bias)
 
     def forward(self, features):
         adapted = self.up(F.gelu(self.down(self.norm(features))))
-        if self.adapter_mode == "residual":
-            adapted = features + adapted
-        return F.normalize(adapted, dim=-1)
+        return F.normalize(features + adapted, dim=-1)
 
 
 class ModalityAdapters(nn.Module):
-    def __init__(self, feature_dim, bottleneck_dim, adapter_mode="residual"):
+    def __init__(self, feature_dim, bottleneck_dim):
         super().__init__()
-        self.sketch = ResidualAdapter(feature_dim, bottleneck_dim, adapter_mode)
-        self.photo = ResidualAdapter(feature_dim, bottleneck_dim, adapter_mode)
+        self.sketch = ResidualAdapter(feature_dim, bottleneck_dim)
+        self.photo = ResidualAdapter(feature_dim, bottleneck_dim)
 
 
 def list_images(class_dir):
@@ -176,13 +171,6 @@ def semantic_loss(sketch_features, photo_features, labels, sketch_text, photo_te
     )
 
 
-def retention_loss(adapted_sketch, adapted_photo, base_sketch, base_photo):
-    return 0.5 * (
-        (1.0 - F.cosine_similarity(adapted_sketch, base_sketch, dim=-1)).mean()
-        + (1.0 - F.cosine_similarity(adapted_photo, base_photo, dim=-1)).mean()
-    )
-
-
 @torch.inference_mode()
 def adapt_features(adapter, features, device, batch_size=4096):
     adapter.eval()
@@ -254,9 +242,9 @@ def save_checkpoint(path, adapters, args, epoch, metrics, seen_classes, unseen_c
             },
             "feature_dim": adapters.sketch.norm.normalized_shape[0],
             "bottleneck_dim": args.bottleneck_dim,
-            "adapter_mode": args.adapter_mode,
-            "model": args.model,
-            "pretrained": args.pretrained,
+            "adapter_mode": "residual",
+            "model": DFN5B_MODEL,
+            "pretrained": DFN5B_PRETRAINED,
             "dataset": args.dataset,
             "seen_classes": seen_classes,
             "unseen_classes": unseen_classes,
@@ -270,47 +258,26 @@ def save_checkpoint(path, adapters, args, epoch, metrics, seen_classes, unseen_c
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True)
-    parser.add_argument("--dataset", default="sketchy_2", choices=sorted(UNSEEN_CLASSES))
-    parser.add_argument("--model", default="ViT-H-14")
-    parser.add_argument("--pretrained", default="laion2b_s32b_b79k")
-    parser.add_argument("--epochs", type=int, default=6)
+    parser.add_argument("--dataset", default="sketchy_1", choices=sorted(UNSEEN_CLASSES))
+    parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--encode_batch_size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=8)
-    parser.add_argument("--bottleneck_dim", type=int, default=64)
-    parser.add_argument(
-        "--adapter_mode",
-        choices=("residual", "non_residual"),
-        default="residual",
-        help="Use x + adapter(x), or adapter(x) without the residual skip.",
-    )
+    parser.add_argument("--bottleneck_dim", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--lambda_retrieval", type=float, default=1.0)
     parser.add_argument("--lambda_semantic", type=float, default=0.5)
-    parser.add_argument("--lambda_retain", type=float, default=0.1)
-    parser.add_argument(
-        "--val_fraction",
-        type=float,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
     parser.add_argument("--warmup_fraction", type=float, default=0.05)
     parser.add_argument("--map_k", type=parse_map_k, default="auto")
     parser.add_argument("--precision_k", type=int, default=0, help="0 selects the dataset default.")
-    parser.add_argument(
-        "--top_k",
-        type=int,
-        default=None,
-        help="Deprecated: overrides both map_k and precision_k.",
-    )
     parser.add_argument("--retrieval_chunk_size", type=int, default=256)
     parser.add_argument("--fp16_backbone", action="store_true")
     parser.add_argument("--max_train_per_class", type=int, default=None)
     parser.add_argument("--max_eval_per_class", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output_dir", default="teacher_adapter_runs/laion_h_sketchy2")
+    parser.add_argument("--output_dir", default="teacher_adapter_runs/dfn5b_sketchy1")
     return parser.parse_args()
 
 
@@ -328,7 +295,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_fp16 = args.fp16_backbone and device.type == "cuda"
     map_k, precision_k = resolve_metric_config(
-        args.dataset, args.map_k, args.precision_k, args.top_k
+        args.dataset, args.map_k, args.precision_k
     )
     map_name = "all" if map_k is None else str(map_k)
     map_metric_key = f"mAP@{map_name}"
@@ -359,11 +326,11 @@ def main():
         seed=args.seed,
     )
 
-    print(f"Loading frozen backbone {args.model} ({args.pretrained})...")
+    print(f"Loading frozen backbone {DFN5B_MODEL} ({DFN5B_PRETRAINED})...")
     backbone, _, preprocess = open_clip.create_model_and_transforms(
-        args.model, pretrained=args.pretrained
+        DFN5B_MODEL, pretrained=DFN5B_PRETRAINED
     )
-    tokenizer = open_clip.get_tokenizer(args.model)
+    tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
     backbone = backbone.eval().to(device)
     for parameter in backbone.parameters():
         parameter.requires_grad_(False)
@@ -441,11 +408,10 @@ def main():
     adapters = ModalityAdapters(
         feature_dim,
         args.bottleneck_dim,
-        adapter_mode=args.adapter_mode,
     ).to(device)
     trainable = sum(parameter.numel() for parameter in adapters.parameters())
     print(
-        f"Adapter mode={args.adapter_mode}; trainable parameters: "
+        "Residual adapter trainable parameters: "
         f"{trainable:,} ({trainable / 1e6:.3f}M)"
     )
     optimizer = torch.optim.AdamW(
@@ -506,7 +472,7 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         adapters.train()
-        totals = {"total": 0.0, "retrieval": 0.0, "semantic": 0.0, "retain": 0.0}
+        totals = {"total": 0.0, "retrieval": 0.0, "semantic": 0.0}
 
         progress = tqdm(
             train_loader,
@@ -535,13 +501,9 @@ def main():
                 seen_text_gpu["photo"],
                 args.temperature,
             )
-            loss_retain = retention_loss(
-                adapted_sketch, adapted_photo, base_sketch, base_photo
-            )
             loss = (
                 args.lambda_retrieval * loss_retrieval
                 + args.lambda_semantic * loss_semantic
-                + args.lambda_retain * loss_retain
             )
 
             optimizer.zero_grad(set_to_none=True)
@@ -553,7 +515,6 @@ def main():
             totals["total"] += loss.item()
             totals["retrieval"] += loss_retrieval.item()
             totals["semantic"] += loss_semantic.item()
-            totals["retain"] += loss_retain.item()
             progress.set_postfix(
                 loss=f"{loss.item():.4f}",
                 lr=f"{optimizer.param_groups[0]['lr']:.2e}",
@@ -606,8 +567,8 @@ def main():
         print(
             f"Epoch {epoch}/{args.epochs} | "
             f"loss={train_metrics['total']:.4f} "
-            f"ret={train_metrics['retrieval']:.4f} "
-            f"sem={train_metrics['semantic']:.4f} | "
+            f"retrieval={train_metrics['retrieval']:.4f} "
+            f"semantic={train_metrics['semantic']:.4f} | "
             f"val {map_metric_key}={unseen_retrieval[map_metric_key]:.4f} "
             f"P@{precision_k}={unseen_retrieval[precision_metric_key]:.4f} "
             f"sketch@1={unseen_metrics['sketch_zero_shot']['top1']:.4f}"

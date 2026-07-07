@@ -9,56 +9,24 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint 
 
 from src.sketchy_dataset import TrainDataset, ValidDataset
-from src.model import TEACHER_CHOICES, ZS_SBIR
+from src.model import ZS_SBIR
 from src.utils import get_all_categories
+from src.data_config import UNSEEN_CLASSES
 
 
 def print_run_config(args):
-    if args.distill_mode == "independent_cosine":
-        print(
-            "[Independent Cosine Distill] weights -> "
-            f"photo={args.lambda_ind_photo}, "
-            f"sketch={args.lambda_ind_sketch}, "
-            f"sketch_photo={args.lambda_ind_sketch_photo}, "
-            f"text={args.lambda_ind_text}"
-        )
-    elif args.distill_mode == "linear_infonce":
-        print(
-            "[Linear InfoNCE Distill] weights -> "
-            f"photo={args.lambda_infonce_photo}, "
-            f"sketch={args.lambda_infonce_sketch}, "
-            f"text={args.lambda_infonce_text}, "
-            f"temp={args.infonce_temperature}"
-        )
-    elif args.distill_mode == "teacher_weighted_ntxent":
-        print(
-            "[Teacher-Weighted NT-Xent] "
-            f"lambda={args.lambda_tw_ntxent}, "
-            f"alpha={args.tw_alpha}, "
-            f"temp={args.tw_temperature}"
-        )
-    else:
-        print(
-            "[KD-div Distill] weights -> "
-            f"sk_ph={getattr(args, 'lambda_rkd_sk_ph', 0.0)}, "
-            f"ph_txt={getattr(args, 'lambda_rkd_ph_txt', 0.0)}, "
-            f"sk_txt={getattr(args, 'lambda_rkd_sk_txt', 0.0)}, "
-            f"temp={getattr(args, 'rkd_temperature', 0.07)}"
-        )
-
     print(
-        "[Loss] base weights -> "
+        "[Loss] CE + Triplet + relational KD(sketch, photo) -> "
         f"cls={args.lambda_cls}, "
         f"triplet={args.lambda_triplet}, "
-        f"nt_xent={args.lambda_nt_xent}"
+        f"kd={args.lambda_kd}, kd_temperature={args.kd_temperature}"
     )
     print(
         "[Run] "
-        f"dataset={args.dataset}, teacher={args.teacher}, distill_mode={args.distill_mode}, "
+        f"dataset={args.dataset}, teacher=DFN5B, "
         f"quantize_fp16={args.quantize_fp16}, "
-        f"teacher_ckpt={args.teacher_ckpt or 'default'}, "
         f"teacher_adapter={args.teacher_adapter_ckpt or 'none'}, "
-        f"teacher_layernorm={args.teacher_layernorm_ckpt or 'none'}, seed={args.seed}"
+        f"seed={args.seed}"
     )
 
 
@@ -80,7 +48,7 @@ def seed_worker(worker_id):
 def get_datasets(args):
     seed_everything(args.seed)
     
-    train_dataset = TrainDataset(args, args.proportion)
+    train_dataset = TrainDataset(args)
     val_sketch = ValidDataset(args, mode='sketch')
     val_photo = ValidDataset(args)
 
@@ -120,97 +88,35 @@ def get_datasets(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=str, default="../datasets/tuberlin", help="path to dataset")
-    parser.add_argument("--ckpt_path", type=str, default="", help="path to dataset")
-    parser.add_argument("--dataset", type=str, default="tuberlin", help="type of dataset")
-    parser.add_argument("--output_dir", type=str, default="", help="output directory")
+    parser.add_argument("--root", type=str, required=True, help="dataset root containing sketch/ and photo/")
+    parser.add_argument("--ckpt_path", type=str, default="", help="student checkpoint to resume")
+    parser.add_argument("--dataset", type=str, default="sketchy_1",
+                        choices=sorted(UNSEEN_CLASSES), help="zero-shot split")
     parser.add_argument("--backbone", type=str, default="ViT-B/32")
     parser.add_argument("--n_ctx", type=int, default=1)
-    parser.add_argument("--img_ctx", type=int, default=2)
     parser.add_argument("--max_size", type=int, default=224)
-    parser.add_argument(
-        "--prompt_depth",
-        type=int,
-        default=1,
-        help="Số layer inject cross-modal prompt vào visual encoder: 1=shallow (default, như code gốc), 12=tất cả layer.",
-    )
-    parser.add_argument("--use_classes", type=int, default=104)
-    parser.add_argument("--data_split", type=int, default=-1)
-    parser.add_argument("--prec", type=str, default="fp16")
-    parser.add_argument("--temperature", type=float, default=0.07)
-    parser.add_argument("--proportion", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
     parser.add_argument("--lambda_cls", type=float, default=1.0,
                         help="Trọng số cho classification loss: CE(photo,text)+CE(sketch,text).")
     parser.add_argument("--lambda_triplet", type=float, default=1.0,
                         help="Trọng số cho triplet loss sketch-photo-negative.")
-    parser.add_argument("--lambda_nt_xent", type=float, default=1.0,
-                        help="Trọng số cho NT-Xent loss giữa photo và sketch student.")
     
-    parser.add_argument("--lr", type=float, default=2e-5)
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument("--lr", type=float, default=4e-5)
+    parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--test_batch_size', type=int, default=1024)
-    parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--workers', type=int, default=2)
-    parser.add_argument('--use_co_sk', type=bool, default=True)
-    parser.add_argument('--use_co_ph', type=bool, default=True)
+    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--progress', action='store_true', default=False,
                         help='Hiện tqdm progress bar trong lúc train')
-    parser.add_argument('--no_aug', action='store_true', default=False,
-                        help='Tắt augmentation cho photo_aug/sketch_aug, dùng transform thường.')
-    parser.add_argument('--visualize', action='store_true', default=False)
-    parser.add_argument('--gzs', action='store_true', default=False)
-    parser.add_argument('--teacher', type=str, default='clip32',
-                        choices=TEACHER_CHOICES,
-                        help=(
-                            "Teacher model cho distillation:\n"
-                            "  clip32 → không dùng strong teacher\n"
-                            "  dfn5b, laion_h"
-                        ))
     parser.add_argument('--quantize_fp16', action='store_true', default=False,
-                        help='Chạy strong teacher dfn5b ở FP16 để giảm VRAM và tăng tốc.')
-    parser.add_argument('--teacher_ckpt', type=str, default='',
-                        help='Đường dẫn checkpoint để load weight cho strong teacher dfn5b.')
+                        help='Chạy DFN5B teacher ở FP16 để giảm VRAM và tăng tốc.')
     parser.add_argument('--teacher_adapter_ckpt', type=str, default='',
-                        help='Checkpoint modality adapter đã fine-tune cho strong teacher.')
-    parser.add_argument('--teacher_layernorm_ckpt', type=str, default='',
-                        help='Checkpoint LayerNorm-only đã fine-tune cho strong teacher.')
-    parser.add_argument('--distill_mode', type=str, default='kd_div',
-                        choices=['kd_div', 'linear_infonce', 'teacher_weighted_ntxent', 'independent_cosine'],
-                        help='Chọn phương pháp distill: kd_div, linear_infonce, teacher_weighted_ntxent, hoặc independent_cosine.')
-    parser.add_argument('--use_rkd', action='store_true', default=False,
-                        help=argparse.SUPPRESS)
-    parser.add_argument('--lambda_rkd_sk_ph', type=float, default=0.0,
-                        help='Trọng số KD-div cho ma trận quan hệ Sketch-Photo.')
-    parser.add_argument('--lambda_rkd_ph_txt', type=float, default=0.0,
-                        help='Trọng số KD-div cho ma trận quan hệ Photo-Text.')
-    parser.add_argument('--lambda_rkd_sk_txt', type=float, default=0.0,
-                        help='Trọng số KD-div cho ma trận quan hệ Sketch-Text.')
-    parser.add_argument('--rkd_temperature', type=float, default=0.07,
-                        help='Temperature cho KD-div similarity distribution.')
-    parser.add_argument('--lambda_infonce_photo', type=float, default=0.0,
-                        help='Trọng số linear InfoNCE giữa student photo và teacher photo.')
-    parser.add_argument('--lambda_infonce_sketch', type=float, default=0.0,
-                        help='Trọng số linear InfoNCE giữa student sketch và teacher sketch.')
-    parser.add_argument('--lambda_infonce_text', type=float, default=0.0,
-                        help='Trọng số linear InfoNCE giữa student text prompts và teacher text.')
-    parser.add_argument('--infonce_temperature', type=float, default=0.07,
-                        help='Temperature cho linear InfoNCE distillation.')
-    parser.add_argument('--lambda_tw_ntxent', type=float, default=0.0,
-                        help='Trọng số Teacher-Weighted NT-Xent giữa sketch-photo student theo phân phối teacher.')
-    parser.add_argument('--tw_alpha', type=float, default=0.3,
-                        help='Mức trộn teacher soft target trong Teacher-Weighted NT-Xent, 0=NT-Xent cứng, 1=theo teacher hoàn toàn.')
-    parser.add_argument('--tw_temperature', type=float, default=0.08,
-                        help='Temperature cho Teacher-Weighted NT-Xent.')
-    parser.add_argument('--lambda_ind_photo', type=float, default=0.0,
-                        help='Trọng số cosine distill độc lập: student photo -> teacher photo.')
-    parser.add_argument('--lambda_ind_sketch', type=float, default=0.0,
-                        help='Trọng số cosine distill độc lập: student sketch -> teacher sketch.')
-    parser.add_argument('--lambda_ind_sketch_photo', type=float, default=0.0,
-                        help='Trọng số cosine distill độc lập: student sketch -> teacher positive photo.')
-    parser.add_argument('--lambda_ind_text', type=float, default=0.0,
-                        help='Trọng số cosine distill độc lập: student text prompt -> teacher text.')
+                        help='Checkpoint modality adapter đã fine-tune cho DFN5B.')
+    parser.add_argument('--lambda_kd', type=float, default=3.0,
+                        help='Trọng số relational KD sketch-photo.')
+    parser.add_argument('--kd_temperature', type=float, default=0.07,
+                        help='Temperature cho phân phối similarity sketch-photo.')
                         
     parser.add_argument('--exp_name', type=str, default='Co_prompt')
 
