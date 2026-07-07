@@ -152,14 +152,25 @@ def get_all_classes(root):
     )
 
 
-def multi_positive_cross_modal_loss(sketch_features, photo_features, labels, temperature):
-    logits = sketch_features @ photo_features.t() / temperature
-    positive_mask = labels[:, None].eq(labels[None, :]).float()
-    targets_sketch = positive_mask / positive_mask.sum(dim=-1, keepdim=True).clamp(min=1)
-    targets_photo = positive_mask.t() / positive_mask.t().sum(dim=-1, keepdim=True).clamp(min=1)
-    loss_sketch = -(targets_sketch * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
-    loss_photo = -(targets_photo * F.log_softmax(logits.t(), dim=-1)).sum(dim=-1).mean()
-    return 0.5 * (loss_sketch + loss_photo)
+def batch_hard_triplet_loss(sketch_features, photo_features, labels, margin):
+    """Cosine triplet loss with the paired photo and hardest different-class photo."""
+    similarities = sketch_features @ photo_features.t()
+    positive_distance = 1.0 - similarities.diagonal()
+
+    negative_mask = labels[:, None].ne(labels[None, :])
+    valid_anchors = negative_mask.any(dim=-1)
+    if not valid_anchors.any():
+        return similarities.sum() * 0.0
+
+    hardest_negative_similarity = similarities.masked_fill(
+        ~negative_mask, float("-inf")
+    ).max(dim=-1).values
+    negative_distance = 1.0 - hardest_negative_similarity
+    return F.relu(
+        positive_distance[valid_anchors]
+        - negative_distance[valid_anchors]
+        + margin
+    ).mean()
 
 
 def semantic_loss(sketch_features, photo_features, labels, sketch_text, photo_text, temperature):
@@ -243,6 +254,7 @@ def save_checkpoint(path, adapters, args, epoch, metrics, seen_classes, unseen_c
             "feature_dim": adapters.sketch.norm.normalized_shape[0],
             "bottleneck_dim": args.bottleneck_dim,
             "adapter_mode": "residual",
+            "teacher_objective": "batch_hard_triplet",
             "model": DFN5B_MODEL,
             "pretrained": DFN5B_PRETRAINED,
             "dataset": args.dataset,
@@ -267,6 +279,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--temperature", type=float, default=0.07)
+    parser.add_argument("--triplet_margin", type=float, default=0.2)
     parser.add_argument("--lambda_retrieval", type=float, default=1.0)
     parser.add_argument("--lambda_semantic", type=float, default=0.5)
     parser.add_argument("--warmup_fraction", type=float, default=0.05)
@@ -311,6 +324,10 @@ def main():
         f"Protocol: train on all {len(seen_classes)} seen classes; "
         f"validate on {len(unseen_classes)} unseen classes. "
         f"Metrics: {map_metric_key}, P@{precision_k}."
+    )
+    print(
+        "Teacher objective: batch-hard sketch-photo triplet + semantic CE "
+        f"(margin={args.triplet_margin})"
     )
 
     train_samples = collect_seen(
@@ -490,8 +507,11 @@ def main():
             adapted_sketch = adapters.sketch(base_sketch)
             adapted_photo = adapters.photo(base_photo)
 
-            loss_retrieval = multi_positive_cross_modal_loss(
-                adapted_sketch, adapted_photo, labels, args.temperature
+            loss_retrieval = batch_hard_triplet_loss(
+                adapted_sketch,
+                adapted_photo,
+                labels,
+                args.triplet_margin,
             )
             loss_semantic = semantic_loss(
                 adapted_sketch,
