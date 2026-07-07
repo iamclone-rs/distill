@@ -152,14 +152,14 @@ def get_all_classes(root):
     )
 
 
-def multi_positive_cross_modal_loss(sketch_features, photo_features, labels, temperature):
+def nt_xent_one_positive_loss(sketch_features, photo_features, temperature):
+    """Symmetric sketch-photo NT-Xent with only the paired diagonal as positive."""
     logits = sketch_features @ photo_features.t() / temperature
-    positive_mask = labels[:, None].eq(labels[None, :]).float()
-    targets_sketch = positive_mask / positive_mask.sum(dim=-1, keepdim=True).clamp(min=1)
-    targets_photo = positive_mask.t() / positive_mask.t().sum(dim=-1, keepdim=True).clamp(min=1)
-    loss_sketch = -(targets_sketch * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
-    loss_photo = -(targets_photo * F.log_softmax(logits.t(), dim=-1)).sum(dim=-1).mean()
-    return 0.5 * (loss_sketch + loss_photo)
+    targets = torch.arange(len(logits), device=logits.device)
+    return 0.5 * (
+        F.cross_entropy(logits, targets)
+        + F.cross_entropy(logits.t(), targets)
+    )
 
 
 def semantic_loss(sketch_features, photo_features, labels, sketch_text, photo_text, temperature):
@@ -243,6 +243,7 @@ def save_checkpoint(path, adapters, args, epoch, metrics, seen_classes, unseen_c
             "feature_dim": adapters.sketch.norm.normalized_shape[0],
             "bottleneck_dim": args.bottleneck_dim,
             "adapter_mode": "residual",
+            "teacher_objective": "nt_xent_one_positive",
             "model": DFN5B_MODEL,
             "pretrained": DFN5B_PRETRAINED,
             "dataset": args.dataset,
@@ -312,6 +313,7 @@ def main():
         f"validate on {len(unseen_classes)} unseen classes. "
         f"Metrics: {map_metric_key}, P@{precision_k}."
     )
+    print("Teacher objective: one-positive symmetric NT-Xent + semantic CE")
 
     train_samples = collect_seen(
         args.root,
@@ -490,8 +492,8 @@ def main():
             adapted_sketch = adapters.sketch(base_sketch)
             adapted_photo = adapters.photo(base_photo)
 
-            loss_retrieval = multi_positive_cross_modal_loss(
-                adapted_sketch, adapted_photo, labels, args.temperature
+            loss_retrieval = nt_xent_one_positive_loss(
+                adapted_sketch, adapted_photo, args.temperature
             )
             loss_semantic = semantic_loss(
                 adapted_sketch,
