@@ -68,6 +68,13 @@ class MultiModalPromptLearner(nn.Module):
         self.prompt_prefix = prompt_prefix
         self.proj = nn.Linear(ctx_dim, 768)
 
+        # Keep the exact RNG sequence of the recorded shallow-prompt benchmark.
+        # The original implementation initialized this projection even when
+        # prompt_depth=1, then discarded it because there were no deep prompts.
+        # Removing that unused allocation changes the sketch prompt projection
+        # initialization and makes seed=42 reproduce a different run.
+        _benchmark_rng_compat = nn.Linear(ctx_dim, 768)
+
         if dtype == torch.float16:
             self.proj.half()
         self.ctx = nn.Parameter(ctx_vectors)
