@@ -33,15 +33,31 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
-def multi_positive_teacher_loss(sketch_features, photo_features, labels, temperature):
-    logits = sketch_features @ photo_features.t() / temperature
-    positive_mask = labels[:, None].eq(labels[None, :]).float()
-    sketch_targets = positive_mask / positive_mask.sum(dim=-1, keepdim=True)
-    photo_targets = sketch_targets.t()
-    return 0.5 * (
-        -(sketch_targets * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
-        -(photo_targets * F.log_softmax(logits.t(), dim=-1)).sum(dim=-1).mean()
-    )
+def batch_hard_teacher_triplet_loss(
+    sketch_features,
+    photo_features,
+    labels,
+    margin=0.2,
+):
+    """Symmetric batch-hard triplet loss for the jointly trained teacher adapters."""
+    sketch_features = F.normalize(sketch_features.float(), dim=-1)
+    photo_features = F.normalize(photo_features.float(), dim=-1)
+    labels = labels.to(sketch_features.device)
+
+    distance = 1.0 - sketch_features @ photo_features.t()
+    positive_mask = labels[:, None].eq(labels[None, :])
+    negative_mask = ~positive_mask
+
+    def one_direction(dist):
+        valid_negative = negative_mask.any(dim=-1)
+        hardest_positive = dist.masked_fill(~positive_mask, -torch.inf).max(dim=-1).values
+        hardest_negative = dist.masked_fill(~negative_mask, torch.inf).min(dim=-1).values
+        losses = F.relu(hardest_positive - hardest_negative + margin)
+        if valid_negative.any():
+            return losses[valid_negative].mean()
+        return dist.new_zeros(())
+
+    return 0.5 * (one_direction(distance) + one_direction(distance.t()))
 
 
 def teacher_semantic_loss(
@@ -96,14 +112,14 @@ def loss_fn(args, features):
             args.kd_temperature,
         )
 
-    teacher_retrieval_loss = torch.zeros((), device=photo_logits.device)
+    teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
     teacher_semantic = torch.zeros((), device=photo_logits.device)
     if joint_teacher_adapter:
-        teacher_retrieval_loss = multi_positive_teacher_loss(
+        teacher_triplet_loss = batch_hard_teacher_triplet_loss(
             teacher_sketch_features,
             teacher_photo_features,
             labels,
-            args.teacher_temperature,
+            args.teacher_triplet_margin,
         )
         teacher_semantic = teacher_semantic_loss(
             teacher_sketch_features,
@@ -118,13 +134,13 @@ def loss_fn(args, features):
         args.lambda_cls * classification_loss
         + args.lambda_triplet * triplet_loss
         + args.lambda_kd * kd_loss
-        + args.lambda_teacher_retrieval * teacher_retrieval_loss
+        + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
     )
     return total_loss, {
         "cls": classification_loss,
         "triplet": triplet_loss,
         "kd_sketch_photo": kd_loss,
-        "teacher_retrieval": teacher_retrieval_loss,
+        "teacher_triplet": teacher_triplet_loss,
         "teacher_semantic": teacher_semantic,
     }

@@ -81,3 +81,21 @@ add the following flags to `src.main_train`:
 DFN5B remains frozen. Its sketch/photo adapters are optimized jointly with
 the student using multi-positive retrieval and semantic classification losses;
 relational KD updates only the student.
+
+## Joint teacher-adapter triplet ablation
+
+On branch `ablation/joint-teacher-adapter-triplet`, the same joint-adapter
+path trains the DFN5B sketch/photo adapters with symmetric batch-hard triplet
+loss instead of multi-positive retrieval:
+
+```bash
+--joint_teacher_adapter \
+--teacher_adapter_bottleneck 32 \
+--teacher_adapter_lr 1e-4 \
+--lambda_teacher_retrieval 1 \
+--lambda_teacher_semantic 0.5 \
+--teacher_triplet_margin 0.2
+```
+
+`--lambda_teacher_retrieval` is kept for command compatibility, but on this
+branch it weights the teacher-adapter triplet loss.

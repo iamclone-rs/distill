@@ -475,7 +475,8 @@ class ZS_SBIR(pl.LightningModule):
             f"cls={getattr(self.args, 'lambda_cls', 1.0)}, "
             f"triplet={getattr(self.args, 'lambda_triplet', 1.0)}, "
             f"kd_sketch_photo={self.args.lambda_kd}, "
-            f"teacher_retrieval={self.args.lambda_teacher_retrieval}, "
+            f"teacher_triplet={self.args.lambda_teacher_retrieval}, "
+            f"teacher_triplet_margin={self.args.teacher_triplet_margin}, "
             f"teacher_semantic={self.args.lambda_teacher_semantic}"
         )
         print("=" * 78)
@@ -555,7 +556,7 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             bar_names = {
                 "kd_sketch_photo": "KD_SP",
-                "teacher_retrieval": "T_RET",
+                "teacher_triplet": "T_TRI",
                 "teacher_semantic": "T_SEM",
             }
             show_on_bar = k in bar_names

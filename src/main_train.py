@@ -25,6 +25,8 @@ def print_run_config(args):
         "[Run] "
         f"dataset={args.dataset}, teacher=DFN5B, "
         f"joint_teacher_adapter={args.joint_teacher_adapter}, "
+        f"teacher_adapter_loss=triplet, "
+        f"teacher_triplet_margin={args.teacher_triplet_margin}, "
         f"quantize_fp16={args.quantize_fp16}, "
         f"teacher_adapter={args.teacher_adapter_ckpt or 'none'}, "
         f"seed={args.seed}"
@@ -118,9 +120,11 @@ if __name__ == "__main__":
                         help='Train DFN5B sketch/photo adapters jointly with the student.')
     parser.add_argument('--teacher_adapter_bottleneck', type=int, default=32)
     parser.add_argument('--teacher_adapter_lr', type=float, default=1e-4)
-    parser.add_argument('--lambda_teacher_retrieval', type=float, default=1.0)
+    parser.add_argument('--lambda_teacher_retrieval', type=float, default=1.0,
+                        help='Trọng số teacher-adapter triplet loss trên nhánh ablation này.')
     parser.add_argument('--lambda_teacher_semantic', type=float, default=0.5)
     parser.add_argument('--teacher_temperature', type=float, default=0.07)
+    parser.add_argument('--teacher_triplet_margin', type=float, default=0.2)
     parser.add_argument('--lambda_kd', type=float, default=3.0,
                         help='Trọng số relational KD sketch-photo.')
     parser.add_argument('--kd_temperature', type=float, default=0.07,
