@@ -9,7 +9,7 @@ from src.data_config import UNSEEN_CLASSES
 CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
 CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
 
-def aumented_transform():
+def augmented_transform():
     transform_list = [
         transforms.RandomResizedCrop(224, scale=(0.85, 1.0)),
         transforms.RandomHorizontalFlip(0.5),
@@ -31,7 +31,7 @@ class TrainDataset(torch.utils.data.Dataset):
     def __init__(self, args):
         self.args = args
         self.transform1 = normal_transform()
-        self.transform2 = aumented_transform()
+        self.transform2 = augmented_transform()
         
         unseen_classes = UNSEEN_CLASSES[self.args.dataset]
 
@@ -68,7 +68,11 @@ class TrainDataset(torch.utils.data.Dataset):
 
         sk_tensor  = self.transform1(sk_data)
         img_tensor = self.transform1(img_data)
-        neg_tensor = self.transform1(neg_data)
+        neg_tensor = (
+            self.transform2(neg_data)
+            if self.args.aug_mode in ("student_aug", "all_aug")
+            else self.transform1(neg_data)
+        )
         
         sk_aug_tensor = self.transform2(sk_data)
         img_aug_tensor = self.transform2(img_data)
