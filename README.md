@@ -99,13 +99,3 @@ loss instead of multi-positive retrieval:
 
 `--lambda_teacher_retrieval` is kept for command compatibility, but on this
 branch it weights the teacher-adapter triplet loss.
-
-Choose which training branch receives image augmentation with:
-
-```bash
---aug_mode teacher_aug  # only DFN5B teacher; backward-compatible default
---aug_mode student_aug  # only student, including its triplet negative
---aug_mode all_aug      # both teacher and student
-```
-
-Validation remains unaugmented for all three modes.
