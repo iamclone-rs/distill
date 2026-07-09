@@ -37,6 +37,16 @@ def _instance_id_from_path(path):
     return stem
 
 
+def _positive_photo_path(root, category, sketch_path):
+    instance_id = _instance_id_from_path(sketch_path)
+    candidates = sorted(
+        glob.glob(os.path.join(root, 'photo', category, instance_id + '.*'))
+    )
+    if len(candidates) == 0:
+        return None
+    return candidates[0]
+
+
 class TrainDataset(torch.utils.data.Dataset):
     def __init__(self, args):
         self.args = args
@@ -68,15 +78,12 @@ class TrainDataset(torch.utils.data.Dataset):
         sk_path  = filepath
         if getattr(self.args, "fine_grained", False):
             instance_id = _instance_id_from_path(sk_path)
-            pos_candidates = glob.glob(
-                os.path.join(self.args.root, 'photo', category, instance_id + '.*')
-            )
-            if len(pos_candidates) == 0:
+            img_path = _positive_photo_path(self.args.root, category, sk_path)
+            if img_path is None:
                 raise FileNotFoundError(
                     f"No fine-grained positive photo for sketch '{sk_path}' "
                     f"(expected photo/{category}/{instance_id}.*)"
                 )
-            img_path = pos_candidates[0]
             same_category_negatives = [
                 p for p in self.all_photos_path[category]
                 if os.path.normcase(os.path.normpath(p))
@@ -117,12 +124,22 @@ class ValidDataset(torch.utils.data.Dataset):
             
         unseen_paths = []
         for category in self.unseen_classes:
-            if self.mode == 'photo':
+            if getattr(self.args, "fine_grained", False) and self.mode == 'photo':
+                matched_photo_paths = []
+                sketch_paths = sorted(
+                    glob.glob(os.path.join(self.args.root, 'sketch', category, '*'))
+                )
+                for sketch_path in sketch_paths:
+                    photo_path = _positive_photo_path(self.args.root, category, sketch_path)
+                    if photo_path is not None:
+                        matched_photo_paths.append(photo_path)
+                unseen_paths.extend(sorted(set(matched_photo_paths)))
+            elif self.mode == 'photo':
                 unseen_paths.extend(glob.glob(os.path.join(self.args.root, 'photo', category, '*')))
             else:
                 unseen_paths.extend(glob.glob(os.path.join(self.args.root, 'sketch', category, '*')))
 
-        self.paths = list(unseen_paths)
+        self.paths = sorted(unseen_paths)
 
     def __getitem__(self, index):
         filepath = self.paths[index]                

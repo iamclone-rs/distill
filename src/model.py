@@ -698,17 +698,22 @@ class ZS_SBIR(pl.LightningModule):
         ap = []
         top1 = []
         top5 = []
+        skipped = 0
+        gallery_sizes = []
         for idx, sk_feat in enumerate(query_feat_all):
             category = all_sketch_category[idx]
             instance_id = all_sketch_instance[idx]
             same_category = np.where(all_photo_category == category)[0]
             if len(same_category) == 0:
+                skipped += 1
                 continue
 
             gallery = gallery_feat_all[same_category]
+            gallery_sizes.append(len(same_category))
             scores = self.distance_fn(sk_feat.unsqueeze(0), gallery)
             target_np = all_photo_instance[same_category] == instance_id
             if not target_np.any():
+                skipped += 1
                 continue
             target = torch.from_numpy(target_np).bool()
 
@@ -732,12 +737,18 @@ class ZS_SBIR(pl.LightningModule):
         if self.global_step > 0:
             self.best_metric = max(self.best_metric, mAP.item())
 
+        avg_gallery = float(np.mean(gallery_sizes)) if gallery_sizes else 0.0
         print(
-            "FG mAP: {}, FG top1: {}, FG top5: {}, Best FG mAP: {}".format(
+            "FG mAP: {}, FG top1: {}, FG top5: {}, Best FG mAP: {} "
+            "| queries={}, gallery={}, skipped={}, avg_same_class_gallery={:.2f}".format(
                 mAP.item(),
                 top1_value.item(),
                 top5_value.item(),
                 self.best_metric,
+                len(query_feat_all),
+                len(gallery_feat_all),
+                skipped,
+                avg_gallery,
             )
         )
         train_loss = self.trainer.callback_metrics.get("train_loss", None)
