@@ -112,8 +112,12 @@ def _infer_teacher_image_size(teacher):
 
 def _load_teacher(args):
     """Load the frozen DFN5B teacher when relational KD is enabled."""
-    if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
-        print("[Teacher] KD và joint adapter đều tắt -> bỏ qua DFN5B teacher")
+    if (
+        args.lambda_kd <= 0
+        and getattr(args, "lambda_text_kd", 0.0) <= 0
+        and not args.joint_teacher_adapter
+    ):
+        print("[Teacher] KD, text KD và joint adapter đều tắt -> bỏ qua DFN5B teacher")
         return None
 
     print(f"[Teacher] Đang load DFN5B ({DFN5B_MODEL})...")
@@ -177,7 +181,9 @@ class CustomCLIP(nn.Module):
         print(
             "[Relational KD] sketch-photo branch -> "
             f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
-            f"temperature={cfg.kd_temperature}"
+            f"temperature={cfg.kd_temperature}; "
+            f"text-text lambda={getattr(cfg, 'lambda_text_kd', 0.0)}, "
+            f"text_temperature={getattr(cfg, 'text_kd_temperature', 0.07)}"
         )
 
     def train(self, mode=True):
@@ -262,15 +268,17 @@ class CustomCLIP(nn.Module):
 
         logits = logit_scale * image_features_normalize @ text_features.t()
         
-        return logits, image_features_normalize
+        return logits, image_features_normalize, text_features
         
     def forward(self, x, classnames):
         photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, neg_tensor, label = x
-        pos_logits, photo_features = self.get_logits(photo_tensor, classnames)
-        sk_logits, sketch_features = self.get_logits(
+        pos_logits, photo_features, student_photo_text = self.get_logits(
+            photo_tensor, classnames
+        )
+        sk_logits, sketch_features, student_sketch_text = self.get_logits(
             sk_tensor, classnames, type='sketch'
         )
-        _, negative_features = self.get_logits(neg_tensor, classnames)
+        _, negative_features, _ = self.get_logits(neg_tensor, classnames)
 
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
@@ -290,7 +298,10 @@ class CustomCLIP(nn.Module):
             teacher_sketch_features = self.adapt_teacher_feature(
                 teacher_sketch_base, "sketch"
             )
-            if self.joint_teacher_adapter:
+            if (
+                self.joint_teacher_adapter
+                or getattr(self.cfg, "lambda_text_kd", 0.0) > 0
+            ):
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features(classnames)
                 )
@@ -308,10 +319,12 @@ class CustomCLIP(nn.Module):
             self.joint_teacher_adapter,
             teacher_sketch_text,
             teacher_photo_text,
+            student_sketch_text,
+            student_photo_text,
         )
         
     def extract_feature(self, image, classname, type='photo'):
-        _, feature = self.get_logits(image, classnames=classname, type=type)
+        _, feature, _ = self.get_logits(image, classnames=classname, type=type)
         return feature
 
 
@@ -475,6 +488,7 @@ class ZS_SBIR(pl.LightningModule):
             f"cls={getattr(self.args, 'lambda_cls', 1.0)}, "
             f"triplet={getattr(self.args, 'lambda_triplet', 1.0)}, "
             f"kd_sketch_photo={self.args.lambda_kd}, "
+            f"text_text_kd={getattr(self.args, 'lambda_text_kd', 0.0)}, "
             f"teacher_triplet={self.args.lambda_teacher_retrieval}, "
             f"teacher_triplet_margin={self.args.teacher_triplet_margin}, "
             f"teacher_semantic={self.args.lambda_teacher_semantic}"
@@ -543,6 +557,8 @@ class ZS_SBIR(pl.LightningModule):
                 "joint_teacher_adapter",
                 "teacher_sketch_text",
                 "teacher_photo_text",
+                "student_sketch_text",
+                "student_photo_text",
             ]
             print("=" * 78)
             print("[CoPrompt Debug] First train batch feature contract")
@@ -556,6 +572,7 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             bar_names = {
                 "kd_sketch_photo": "KD_SP",
+                "text_text_kd": "TXT_KD",
                 "teacher_triplet": "T_TRI",
                 "teacher_semantic": "T_SEM",
             }

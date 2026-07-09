@@ -33,6 +33,34 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
+def text_text_kd_loss(
+    student_sketch_text,
+    student_photo_text,
+    teacher_sketch_text,
+    teacher_photo_text,
+    temperature=0.07,
+):
+    """Match the student and teacher sketch-text to photo-text relations."""
+    student_device = student_sketch_text.device
+    student_sketch_text = F.normalize(student_sketch_text.float(), dim=-1)
+    student_photo_text = F.normalize(student_photo_text.float(), dim=-1)
+    teacher_sketch_text = F.normalize(
+        teacher_sketch_text.to(device=student_device, dtype=torch.float32), dim=-1
+    )
+    teacher_photo_text = F.normalize(
+        teacher_photo_text.to(device=student_device, dtype=torch.float32), dim=-1
+    )
+
+    student_logits = student_sketch_text @ student_photo_text.t() / temperature
+    student_log_probs = F.log_softmax(student_logits, dim=-1)
+
+    with torch.no_grad():
+        teacher_logits = teacher_sketch_text @ teacher_photo_text.t() / temperature
+        teacher_probs = F.softmax(teacher_logits, dim=-1)
+
+    return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+
+
 def batch_hard_teacher_triplet_loss(
     sketch_features,
     photo_features,
@@ -88,6 +116,8 @@ def loss_fn(args, features):
         joint_teacher_adapter,
         teacher_sketch_text,
         teacher_photo_text,
+        student_sketch_text,
+        student_photo_text,
     ) = features
 
     labels = labels.to(photo_logits.device)
@@ -112,6 +142,21 @@ def loss_fn(args, features):
             args.kd_temperature,
         )
 
+    text_kd_loss = torch.zeros((), device=photo_logits.device)
+    if (
+        teacher_active
+        and args.lambda_text_kd > 0
+        and teacher_sketch_text is not None
+        and teacher_photo_text is not None
+    ):
+        text_kd_loss = text_text_kd_loss(
+            student_sketch_text,
+            student_photo_text,
+            teacher_sketch_text,
+            teacher_photo_text,
+            args.text_kd_temperature,
+        )
+
     teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
     teacher_semantic = torch.zeros((), device=photo_logits.device)
     if joint_teacher_adapter:
@@ -134,6 +179,7 @@ def loss_fn(args, features):
         args.lambda_cls * classification_loss
         + args.lambda_triplet * triplet_loss
         + args.lambda_kd * kd_loss
+        + args.lambda_text_kd * text_kd_loss
         + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
     )
@@ -141,6 +187,7 @@ def loss_fn(args, features):
         "cls": classification_loss,
         "triplet": triplet_loss,
         "kd_sketch_photo": kd_loss,
+        "text_text_kd": text_kd_loss,
         "teacher_triplet": teacher_triplet_loss,
         "teacher_semantic": teacher_semantic,
     }
