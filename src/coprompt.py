@@ -39,6 +39,8 @@ class MultiModalPromptLearner(nn.Module):
         self.clip_model = clip_model
         self.cfg = cfg
         n_ctx = cfg.n_ctx
+        if n_ctx < 0:
+            raise ValueError("n_ctx must be >= 0")
         ctx_init = "a photo/sketch of "
             
         dtype = clip_model.dtype
@@ -78,6 +80,9 @@ class MultiModalPromptLearner(nn.Module):
         if dtype == torch.float16:
             self.proj.half()
         self.ctx = nn.Parameter(ctx_vectors)
+        if n_ctx == 0:
+            self.ctx.requires_grad_(False)
+            self.proj.requires_grad_(False)
 
         self.n_ctx = n_ctx
         

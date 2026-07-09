@@ -27,6 +27,7 @@ def print_run_config(args):
     print(
         "[Run] "
         f"dataset={args.dataset}, teacher=DFN5B, "
+        f"n_ctx={args.n_ctx}, "
         f"joint_teacher_adapter={args.joint_teacher_adapter}, "
         f"teacher_adapter_loss=triplet, "
         f"teacher_triplet_margin={args.teacher_triplet_margin}, "
