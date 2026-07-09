@@ -33,6 +33,82 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
+def topk_text_relation_kd_loss(
+    student_text,
+    teacher_text,
+    topk=5,
+    margin=0.05,
+):
+    """Keep teacher-selected semantic neighbors close in the student text space."""
+    num_classes = student_text.shape[0]
+    if num_classes <= 2:
+        return student_text.new_zeros(())
+
+    k = min(max(int(topk), 1), num_classes - 1)
+    student_device = student_text.device
+    student_text = F.normalize(student_text.float(), dim=-1)
+    teacher_text = F.normalize(
+        teacher_text.to(device=student_device, dtype=torch.float32), dim=-1
+    )
+
+    diagonal_mask = torch.eye(num_classes, device=student_device, dtype=torch.bool)
+    with torch.no_grad():
+        teacher_sim = teacher_text @ teacher_text.t()
+        teacher_sim = teacher_sim.masked_fill(diagonal_mask, -torch.inf)
+        positive_indices = teacher_sim.topk(k, dim=-1).indices
+
+    positive_mask = torch.zeros(
+        num_classes, num_classes, device=student_device, dtype=torch.bool
+    )
+    positive_mask.scatter_(1, positive_indices, True)
+    negative_mask = ~(positive_mask | diagonal_mask)
+    if not negative_mask.any():
+        return student_text.new_zeros(())
+
+    student_sim = student_text @ student_text.t()
+    positive_sim = student_sim.gather(1, positive_indices)
+    hardest_negative = student_sim.masked_fill(~negative_mask, -torch.inf).max(dim=-1).values
+    valid = torch.isfinite(hardest_negative)
+    if not valid.any():
+        return student_text.new_zeros(())
+
+    loss = F.relu(margin - positive_sim[valid] + hardest_negative[valid, None])
+    return loss.mean()
+
+
+def topk_text_kd_loss(
+    student_sketch_text,
+    student_photo_text,
+    teacher_sketch_text,
+    teacher_photo_text,
+    mode,
+    topk,
+    margin,
+):
+    losses = []
+    if mode in ("topk_sketch", "topk_both"):
+        losses.append(
+            topk_text_relation_kd_loss(
+                student_sketch_text,
+                teacher_sketch_text,
+                topk=topk,
+                margin=margin,
+            )
+        )
+    if mode in ("topk_photo", "topk_both"):
+        losses.append(
+            topk_text_relation_kd_loss(
+                student_photo_text,
+                teacher_photo_text,
+                topk=topk,
+                margin=margin,
+            )
+        )
+    if not losses:
+        return student_sketch_text.new_zeros(())
+    return torch.stack(losses).mean()
+
+
 def batch_hard_teacher_triplet_loss(
     sketch_features,
     photo_features,
@@ -88,6 +164,8 @@ def loss_fn(args, features):
         joint_teacher_adapter,
         teacher_sketch_text,
         teacher_photo_text,
+        student_sketch_text,
+        student_photo_text,
     ) = features
 
     labels = labels.to(photo_logits.device)
@@ -112,6 +190,24 @@ def loss_fn(args, features):
             args.kd_temperature,
         )
 
+    text_kd_loss = torch.zeros((), device=photo_logits.device)
+    if (
+        teacher_active
+        and args.lambda_text_kd > 0
+        and args.text_kd_mode != "none"
+        and teacher_sketch_text is not None
+        and teacher_photo_text is not None
+    ):
+        text_kd_loss = topk_text_kd_loss(
+            student_sketch_text,
+            student_photo_text,
+            teacher_sketch_text,
+            teacher_photo_text,
+            args.text_kd_mode,
+            args.text_kd_topk,
+            args.text_kd_margin,
+        )
+
     teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
     teacher_semantic = torch.zeros((), device=photo_logits.device)
     if joint_teacher_adapter:
@@ -134,6 +230,7 @@ def loss_fn(args, features):
         args.lambda_cls * classification_loss
         + args.lambda_triplet * triplet_loss
         + args.lambda_kd * kd_loss
+        + args.lambda_text_kd * text_kd_loss
         + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
     )
@@ -141,6 +238,7 @@ def loss_fn(args, features):
         "cls": classification_loss,
         "triplet": triplet_loss,
         "kd_sketch_photo": kd_loss,
+        "topk_text_kd": text_kd_loss,
         "teacher_triplet": teacher_triplet_loss,
         "teacher_semantic": teacher_semantic,
     }
