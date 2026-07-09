@@ -60,6 +60,20 @@ def batch_hard_teacher_triplet_loss(
     return 0.5 * (one_direction(distance) + one_direction(distance.t()))
 
 
+def instance_teacher_triplet_loss(
+    sketch_features,
+    photo_features,
+    negative_features,
+    margin=0.2,
+):
+    """Instance-level teacher-adapter triplet for fine-grained SBIR."""
+    cosine_distance = lambda x, y: 1.0 - F.cosine_similarity(x, y)
+    return nn.TripletMarginWithDistanceLoss(
+        distance_function=cosine_distance,
+        margin=margin,
+    )(sketch_features, photo_features, negative_features)
+
+
 def teacher_semantic_loss(
     sketch_features,
     photo_features,
@@ -88,6 +102,7 @@ def loss_fn(args, features):
         joint_teacher_adapter,
         teacher_sketch_text,
         teacher_photo_text,
+        teacher_negative_features,
     ) = features
 
     labels = labels.to(photo_logits.device)
@@ -115,12 +130,20 @@ def loss_fn(args, features):
     teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
     teacher_semantic = torch.zeros((), device=photo_logits.device)
     if joint_teacher_adapter:
-        teacher_triplet_loss = batch_hard_teacher_triplet_loss(
-            teacher_sketch_features,
-            teacher_photo_features,
-            labels,
-            args.teacher_triplet_margin,
-        )
+        if getattr(args, "fine_grained", False):
+            teacher_triplet_loss = instance_teacher_triplet_loss(
+                teacher_sketch_features,
+                teacher_photo_features,
+                teacher_negative_features,
+                args.teacher_triplet_margin,
+            )
+        else:
+            teacher_triplet_loss = batch_hard_teacher_triplet_loss(
+                teacher_sketch_features,
+                teacher_photo_features,
+                labels,
+                args.teacher_triplet_margin,
+            )
         teacher_semantic = teacher_semantic_loss(
             teacher_sketch_features,
             teacher_photo_features,

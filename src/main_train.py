@@ -24,6 +24,7 @@ def print_run_config(args):
     print(
         "[Run] "
         f"dataset={args.dataset}, teacher=DFN5B, "
+        f"fine_grained={args.fine_grained}, "
         f"joint_teacher_adapter={args.joint_teacher_adapter}, "
         f"teacher_adapter_loss=triplet, "
         f"teacher_triplet_margin={args.teacher_triplet_margin}, "
@@ -100,6 +101,8 @@ if __name__ == "__main__":
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
+    parser.add_argument("--fine_grained", action="store_true", default=False,
+                        help="Train/evaluate fine-grained SBIR: instance positive, same-class negative, instance metrics.")
     parser.add_argument("--lambda_cls", type=float, default=1.0,
                         help="Trọng số cho classification loss: CE(photo,text)+CE(sketch,text).")
     parser.add_argument("--lambda_triplet", type=float, default=1.0,

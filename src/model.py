@@ -274,6 +274,7 @@ class CustomCLIP(nn.Module):
 
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
+        teacher_negative_features = negative_features.detach()
         teacher_sketch_text = None
         teacher_photo_text = None
         if self.teacher_active:
@@ -284,12 +285,22 @@ class CustomCLIP(nn.Module):
                 teacher_sketch_base = self.model_distill.encode_image(
                     self.teacher_image_input(sk_aug_tensor)
                 )
+                if getattr(self.cfg, "fine_grained", False):
+                    teacher_negative_base = self.model_distill.encode_image(
+                        self.teacher_image_input(neg_tensor)
+                    )
+                else:
+                    teacher_negative_base = None
             teacher_photo_features = self.adapt_teacher_feature(
                 teacher_photo_base, "photo"
             )
             teacher_sketch_features = self.adapt_teacher_feature(
                 teacher_sketch_base, "sketch"
             )
+            if teacher_negative_base is not None:
+                teacher_negative_features = self.adapt_teacher_feature(
+                    teacher_negative_base, "photo"
+                )
             if self.joint_teacher_adapter:
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features(classnames)
@@ -308,6 +319,7 @@ class CustomCLIP(nn.Module):
             self.joint_teacher_adapter,
             teacher_sketch_text,
             teacher_photo_text,
+            teacher_negative_features,
         )
         
     def extract_feature(self, image, classname, type='photo'):
@@ -543,6 +555,7 @@ class ZS_SBIR(pl.LightningModule):
                 "joint_teacher_adapter",
                 "teacher_sketch_text",
                 "teacher_photo_text",
+                "teacher_negative_features",
             ]
             print("=" * 78)
             print("[CoPrompt Debug] First train batch feature contract")
@@ -585,15 +598,30 @@ class ZS_SBIR(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx, dataloader_idx):
         classnames = get_all_categories(self.args)
-        image_tensor, label = batch
+        if getattr(self.args, "fine_grained", False):
+            image_tensor, label, category, instance_id = batch
+        else:
+            image_tensor, label = batch
+            category = None
+            instance_id = None
         if dataloader_idx == 0:
             feat = self.model.extract_feature(image_tensor, classname=classnames, type='sketch')
-            self.val_step_outputs_sk.append((feat, label))
+            if getattr(self.args, "fine_grained", False):
+                self.val_step_outputs_sk.append((feat, label, category, instance_id))
+            else:
+                self.val_step_outputs_sk.append((feat, label))
         else:
             feat = self.model.extract_feature(image_tensor, classname=classnames, type='photo')
-            self.val_step_outputs_ph.append((feat, label))
+            if getattr(self.args, "fine_grained", False):
+                self.val_step_outputs_ph.append((feat, label, category, instance_id))
+            else:
+                self.val_step_outputs_ph.append((feat, label))
 
     def on_validation_epoch_end(self):
+        if getattr(self.args, "fine_grained", False):
+            self._fine_grained_validation_epoch_end()
+            return
+
         query_len = len(self.val_step_outputs_sk)
         gallery_len = len(self.val_step_outputs_ph)
 
@@ -640,6 +668,78 @@ class ZS_SBIR(pl.LightningModule):
             print('mAP@{}: {}, P@{}: {}, Best mAP: {}'.format(map_k, mAP.item(), p_k, precision, self.best_metric))
         else:
             print('mAP@all: {}, P@{}: {}, Best mAP: {}'.format(mAP.item(), p_k, precision, self.best_metric))
+        train_loss = self.trainer.callback_metrics.get("train_loss", None)
+        if train_loss is not None:
+            print(f"Train loss (epoch avg): {train_loss.item():.6f}")
+
+        self.val_step_outputs_sk.clear()
+        self.val_step_outputs_ph.clear()
+
+    def _fine_grained_validation_epoch_end(self):
+        query_len = len(self.val_step_outputs_sk)
+        gallery_len = len(self.val_step_outputs_ph)
+
+        query_feat_all = torch.cat([self.val_step_outputs_sk[i][0] for i in range(query_len)])
+        gallery_feat_all = torch.cat([self.val_step_outputs_ph[i][0] for i in range(gallery_len)])
+
+        all_sketch_category = np.array(
+            sum([list(self.val_step_outputs_sk[i][2]) for i in range(query_len)], [])
+        )
+        all_photo_category = np.array(
+            sum([list(self.val_step_outputs_ph[i][2]) for i in range(gallery_len)], [])
+        )
+        all_sketch_instance = np.array(
+            sum([list(self.val_step_outputs_sk[i][3]) for i in range(query_len)], [])
+        )
+        all_photo_instance = np.array(
+            sum([list(self.val_step_outputs_ph[i][3]) for i in range(gallery_len)], [])
+        )
+
+        ap = []
+        top1 = []
+        top5 = []
+        for idx, sk_feat in enumerate(query_feat_all):
+            category = all_sketch_category[idx]
+            instance_id = all_sketch_instance[idx]
+            same_category = np.where(all_photo_category == category)[0]
+            if len(same_category) == 0:
+                continue
+
+            gallery = gallery_feat_all[same_category]
+            scores = self.distance_fn(sk_feat.unsqueeze(0), gallery)
+            target_np = all_photo_instance[same_category] == instance_id
+            if not target_np.any():
+                continue
+            target = torch.from_numpy(target_np).bool()
+
+            ap.append(retrieval_average_precision(scores.cpu(), target.cpu()))
+            ranked_target = target[scores.detach().cpu().argsort(descending=True)]
+            top1.append(ranked_target[:1].any().float())
+            top5.append(ranked_target[: min(5, ranked_target.numel())].any().float())
+
+        if len(ap) == 0:
+            mAP = torch.tensor(0.0)
+            top1_value = torch.tensor(0.0)
+            top5_value = torch.tensor(0.0)
+        else:
+            mAP = torch.stack(ap).mean()
+            top1_value = torch.stack(top1).mean()
+            top5_value = torch.stack(top5).mean()
+
+        self.log("mAP", mAP, on_step=False, on_epoch=True)
+        self.log("FG_top1", top1_value, on_step=False, on_epoch=True)
+        self.log("FG_top5", top5_value, on_step=False, on_epoch=True)
+        if self.global_step > 0:
+            self.best_metric = max(self.best_metric, mAP.item())
+
+        print(
+            "FG mAP: {}, FG top1: {}, FG top5: {}, Best FG mAP: {}".format(
+                mAP.item(),
+                top1_value.item(),
+                top5_value.item(),
+                self.best_metric,
+            )
+        )
         train_loss = self.trainer.callback_metrics.get("train_loss", None)
         if train_loss is not None:
             print(f"Train loss (epoch avg): {train_loss.item():.6f}")

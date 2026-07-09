@@ -27,6 +27,16 @@ def normal_transform():
     ])
     return dataset_transforms
 
+
+def _instance_id_from_path(path):
+    """Return the photo instance id used by Sketchy fine-grained matching."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    parts = stem.split("-")
+    if len(parts) > 1:
+        return "-".join(parts[:-1])
+    return stem
+
+
 class TrainDataset(torch.utils.data.Dataset):
     def __init__(self, args):
         self.args = args
@@ -54,13 +64,34 @@ class TrainDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         filepath = self.all_sketches_path[index]                
         category = filepath.split(os.path.sep)[-2]
-        
-        neg_classes = self.all_categories.copy()
-        neg_classes.remove(category)
 
         sk_path  = filepath
-        img_path = np.random.choice(self.all_photos_path[category])
-        neg_path = np.random.choice(self.all_photos_path[np.random.choice(neg_classes)])
+        if getattr(self.args, "fine_grained", False):
+            instance_id = _instance_id_from_path(sk_path)
+            pos_candidates = glob.glob(
+                os.path.join(self.args.root, 'photo', category, instance_id + '.*')
+            )
+            if len(pos_candidates) == 0:
+                raise FileNotFoundError(
+                    f"No fine-grained positive photo for sketch '{sk_path}' "
+                    f"(expected photo/{category}/{instance_id}.*)"
+                )
+            img_path = pos_candidates[0]
+            same_category_negatives = [
+                p for p in self.all_photos_path[category]
+                if os.path.normcase(os.path.normpath(p))
+                != os.path.normcase(os.path.normpath(img_path))
+            ]
+            if len(same_category_negatives) == 0:
+                raise RuntimeError(
+                    f"Need at least two photos in category '{category}' for fine-grained triplet."
+                )
+            neg_path = np.random.choice(same_category_negatives)
+        else:
+            neg_classes = self.all_categories.copy()
+            neg_classes.remove(category)
+            img_path = np.random.choice(self.all_photos_path[category])
+            neg_path = np.random.choice(self.all_photos_path[np.random.choice(neg_classes)])
 
         sk_data  = ImageOps.pad(Image.open(sk_path).convert('RGB'),  size=(self.args.max_size, self.args.max_size))
         img_data = ImageOps.pad(Image.open(img_path).convert('RGB'), size=(self.args.max_size, self.args.max_size))
@@ -100,7 +131,10 @@ class ValidDataset(torch.utils.data.Dataset):
         image = ImageOps.pad(Image.open(filepath).convert('RGB'),  size=(self.args.max_size, self.args.max_size))
         image_tensor = self.transform(image)
         
-        return image_tensor, self.unseen_classes.index(category)
+        label = self.unseen_classes.index(category)
+        if getattr(self.args, "fine_grained", False):
+            return image_tensor, label, category, _instance_id_from_path(filepath)
+        return image_tensor, label
     
     def __len__(self):
         return len(self.paths)
