@@ -19,7 +19,10 @@ def print_run_config(args):
         "[Loss] CE + Triplet + relational KD(sketch, photo) -> "
         f"cls={args.lambda_cls}, "
         f"triplet={args.lambda_triplet}, "
-        f"kd={args.lambda_kd}, kd_temperature={args.kd_temperature}"
+        f"kd={args.lambda_kd}, kd_temperature={args.kd_temperature}, "
+        f"image_text_kd={args.lambda_image_text_kd}, "
+        f"image_text_kd_mode={args.image_text_kd_mode}, "
+        f"image_text_kd_temperature={args.image_text_kd_temperature}"
     )
     print(
         "[Run] "
@@ -129,6 +132,13 @@ if __name__ == "__main__":
                         help='Trọng số relational KD sketch-photo.')
     parser.add_argument('--kd_temperature', type=float, default=0.07,
                         help='Temperature cho phân phối similarity sketch-photo.')
+    parser.add_argument('--lambda_image_text_kd', type=float, default=0.0,
+                        help='Trọng số KL distill image-text logits từ DFN5B sang student.')
+    parser.add_argument('--image_text_kd_mode', type=str, default='none',
+                        choices=['none', 'sketch', 'photo', 'both'],
+                        help='Chọn nhánh image-text KD.')
+    parser.add_argument('--image_text_kd_temperature', type=float, default=0.07,
+                        help='Temperature cho image-text KD.')
                         
     parser.add_argument('--exp_name', type=str, default='Co_prompt')
 

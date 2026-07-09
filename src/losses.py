@@ -33,6 +33,74 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
+def image_text_kd_loss(
+    student_image,
+    student_text,
+    teacher_image,
+    teacher_text,
+    temperature=0.07,
+):
+    """Match teacher and student image-to-text class distributions."""
+    student_device = student_image.device
+    student_image = F.normalize(student_image.float(), dim=-1)
+    student_text = F.normalize(student_text.float(), dim=-1)
+    teacher_image = F.normalize(
+        teacher_image.to(device=student_device, dtype=torch.float32), dim=-1
+    )
+    teacher_text = F.normalize(
+        teacher_text.to(device=student_device, dtype=torch.float32), dim=-1
+    )
+
+    student_logits = student_image @ student_text.t() / temperature
+    student_log_probs = F.log_softmax(student_logits, dim=-1)
+
+    with torch.no_grad():
+        teacher_logits = teacher_image @ teacher_text.t() / temperature
+        teacher_probs = F.softmax(teacher_logits, dim=-1)
+
+    return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (
+        temperature ** 2
+    )
+
+
+def image_text_kd_total(
+    sketch_features,
+    photo_features,
+    student_sketch_text,
+    student_photo_text,
+    teacher_sketch_features,
+    teacher_photo_features,
+    teacher_sketch_text,
+    teacher_photo_text,
+    mode,
+    temperature,
+):
+    losses = []
+    if mode in ("sketch", "both"):
+        losses.append(
+            image_text_kd_loss(
+                sketch_features,
+                student_sketch_text,
+                teacher_sketch_features,
+                teacher_sketch_text,
+                temperature,
+            )
+        )
+    if mode in ("photo", "both"):
+        losses.append(
+            image_text_kd_loss(
+                photo_features,
+                student_photo_text,
+                teacher_photo_features,
+                teacher_photo_text,
+                temperature,
+            )
+        )
+    if not losses:
+        return sketch_features.new_zeros(())
+    return torch.stack(losses).mean()
+
+
 def batch_hard_teacher_triplet_loss(
     sketch_features,
     photo_features,
@@ -88,6 +156,8 @@ def loss_fn(args, features):
         joint_teacher_adapter,
         teacher_sketch_text,
         teacher_photo_text,
+        student_sketch_text,
+        student_photo_text,
     ) = features
 
     labels = labels.to(photo_logits.device)
@@ -112,6 +182,27 @@ def loss_fn(args, features):
             args.kd_temperature,
         )
 
+    image_text_kd = torch.zeros((), device=photo_logits.device)
+    if (
+        teacher_active
+        and args.lambda_image_text_kd > 0
+        and args.image_text_kd_mode != "none"
+        and teacher_sketch_text is not None
+        and teacher_photo_text is not None
+    ):
+        image_text_kd = image_text_kd_total(
+            sketch_features,
+            photo_features,
+            student_sketch_text,
+            student_photo_text,
+            teacher_sketch_features,
+            teacher_photo_features,
+            teacher_sketch_text,
+            teacher_photo_text,
+            args.image_text_kd_mode,
+            args.image_text_kd_temperature,
+        )
+
     teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
     teacher_semantic = torch.zeros((), device=photo_logits.device)
     if joint_teacher_adapter:
@@ -134,6 +225,7 @@ def loss_fn(args, features):
         args.lambda_cls * classification_loss
         + args.lambda_triplet * triplet_loss
         + args.lambda_kd * kd_loss
+        + args.lambda_image_text_kd * image_text_kd
         + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
     )
@@ -141,6 +233,7 @@ def loss_fn(args, features):
         "cls": classification_loss,
         "triplet": triplet_loss,
         "kd_sketch_photo": kd_loss,
+        "image_text_kd": image_text_kd,
         "teacher_triplet": teacher_triplet_loss,
         "teacher_semantic": teacher_semantic,
     }
