@@ -114,7 +114,7 @@ def loss_fn(args, features):
     cosine_distance = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet_loss = nn.TripletMarginWithDistanceLoss(
         distance_function=cosine_distance,
-        margin=0.2,
+        margin=args.triplet_margin,
     )(sketch_features, photo_features, negative_features)
 
     kd_loss = torch.zeros((), device=photo_logits.device)

@@ -18,7 +18,7 @@ def print_run_config(args):
     print(
         "[Loss] CE + Triplet + relational KD(sketch, photo) -> "
         f"cls={args.lambda_cls}, "
-        f"triplet={args.lambda_triplet}, "
+        f"triplet={args.lambda_triplet}, triplet_margin={args.triplet_margin}, "
         f"kd={args.lambda_kd}, kd_temperature={args.kd_temperature}"
     )
     print(
@@ -107,6 +107,8 @@ if __name__ == "__main__":
                         help="Trọng số cho classification loss: CE(photo,text)+CE(sketch,text).")
     parser.add_argument("--lambda_triplet", type=float, default=1.0,
                         help="Trọng số cho triplet loss sketch-photo-negative.")
+    parser.add_argument("--triplet_margin", type=float, default=0.2,
+                        help="Margin cho student triplet loss.")
     
     parser.add_argument("--lr", type=float, default=4e-5)
     parser.add_argument('--batch_size', type=int, default=64)

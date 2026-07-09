@@ -486,6 +486,7 @@ class ZS_SBIR(pl.LightningModule):
             "[CoPrompt Debug] Loss weights: "
             f"cls={getattr(self.args, 'lambda_cls', 1.0)}, "
             f"triplet={getattr(self.args, 'lambda_triplet', 1.0)}, "
+            f"triplet_margin={getattr(self.args, 'triplet_margin', 0.2)}, "
             f"kd_sketch_photo={self.args.lambda_kd}, "
             f"teacher_triplet={self.args.lambda_teacher_retrieval}, "
             f"teacher_triplet_margin={self.args.teacher_triplet_margin}, "
