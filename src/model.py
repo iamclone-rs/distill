@@ -741,11 +741,12 @@ class ZS_SBIR(pl.LightningModule):
         avg_gallery = float(np.mean(gallery_sizes)) if gallery_sizes else 0.0
         print(
             "FG mAP: {}, FG top1: {}, FG top5: {}, Best FG mAP: {} "
-            "| queries={}, gallery={}, skipped={}, avg_same_class_gallery={:.2f}".format(
+            "| gallery_mode={}, queries={}, gallery={}, skipped={}, avg_same_class_gallery={:.2f}".format(
                 mAP.item(),
                 top1_value.item(),
                 top5_value.item(),
                 self.best_metric,
+                getattr(self.args, "fg_gallery_mode", "unique"),
                 len(query_feat_all),
                 len(gallery_feat_all),
                 skipped,

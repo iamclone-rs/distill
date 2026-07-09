@@ -133,7 +133,10 @@ class ValidDataset(torch.utils.data.Dataset):
                     photo_path = _positive_photo_path(self.args.root, category, sketch_path)
                     if photo_path is not None:
                         matched_photo_paths.append(photo_path)
-                unseen_paths.extend(sorted(set(matched_photo_paths)))
+                if getattr(self.args, "fg_gallery_mode", "unique") == "paired_duplicate":
+                    unseen_paths.extend(matched_photo_paths)
+                else:
+                    unseen_paths.extend(sorted(set(matched_photo_paths)))
             elif self.mode == 'photo':
                 unseen_paths.extend(glob.glob(os.path.join(self.args.root, 'photo', category, '*')))
             else:
