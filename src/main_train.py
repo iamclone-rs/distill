@@ -21,7 +21,8 @@ def print_run_config(args):
         f"triplet={args.lambda_triplet}, "
         f"kd={args.lambda_kd}, kd_temperature={args.kd_temperature}, "
         f"text_kd={args.lambda_text_kd}, "
-        f"text_kd_temperature={args.text_kd_temperature}"
+        f"text_kd_temperature={args.text_kd_temperature}, "
+        f"bidirectional_text_kd={args.bidirectional_text_kd}"
     )
     print(
         "[Run] "
@@ -135,6 +136,8 @@ if __name__ == "__main__":
                         help='Trọng số text-text KD giữa student prompt text và DFN5B text.')
     parser.add_argument('--text_kd_temperature', type=float, default=0.07,
                         help='Temperature cho text-text KD.')
+    parser.add_argument('--bidirectional_text_kd', action='store_true', default=False,
+                        help='Dùng text-text KD hai chiều: sketch->photo và photo->sketch.')
                         
     parser.add_argument('--exp_name', type=str, default='Co_prompt')
 

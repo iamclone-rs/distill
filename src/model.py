@@ -489,6 +489,7 @@ class ZS_SBIR(pl.LightningModule):
             f"triplet={getattr(self.args, 'lambda_triplet', 1.0)}, "
             f"kd_sketch_photo={self.args.lambda_kd}, "
             f"text_text_kd={getattr(self.args, 'lambda_text_kd', 0.0)}, "
+            f"bidirectional_text_kd={getattr(self.args, 'bidirectional_text_kd', False)}, "
             f"teacher_triplet={self.args.lambda_teacher_retrieval}, "
             f"teacher_triplet_margin={self.args.teacher_triplet_margin}, "
             f"teacher_semantic={self.args.lambda_teacher_semantic}"

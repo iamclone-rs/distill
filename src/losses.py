@@ -39,6 +39,7 @@ def text_text_kd_loss(
     teacher_sketch_text,
     teacher_photo_text,
     temperature=0.07,
+    bidirectional=False,
 ):
     """Match the student and teacher sketch-text to photo-text relations."""
     student_device = student_sketch_text.device
@@ -51,14 +52,32 @@ def text_text_kd_loss(
         teacher_photo_text.to(device=student_device, dtype=torch.float32), dim=-1
     )
 
-    student_logits = student_sketch_text @ student_photo_text.t() / temperature
-    student_log_probs = F.log_softmax(student_logits, dim=-1)
+    def one_direction(student_query, student_target, teacher_query, teacher_target):
+        student_logits = student_query @ student_target.t() / temperature
+        student_log_probs = F.log_softmax(student_logits, dim=-1)
 
-    with torch.no_grad():
-        teacher_logits = teacher_sketch_text @ teacher_photo_text.t() / temperature
-        teacher_probs = F.softmax(teacher_logits, dim=-1)
+        with torch.no_grad():
+            teacher_logits = teacher_query @ teacher_target.t() / temperature
+            teacher_probs = F.softmax(teacher_logits, dim=-1)
 
-    return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+        return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+
+    sketch_to_photo = one_direction(
+        student_sketch_text,
+        student_photo_text,
+        teacher_sketch_text,
+        teacher_photo_text,
+    )
+    if not bidirectional:
+        return sketch_to_photo
+
+    photo_to_sketch = one_direction(
+        student_photo_text,
+        student_sketch_text,
+        teacher_photo_text,
+        teacher_sketch_text,
+    )
+    return 0.5 * (sketch_to_photo + photo_to_sketch)
 
 
 def batch_hard_teacher_triplet_loss(
@@ -155,6 +174,7 @@ def loss_fn(args, features):
             teacher_sketch_text,
             teacher_photo_text,
             args.text_kd_temperature,
+            args.bidirectional_text_kd,
         )
 
     teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
