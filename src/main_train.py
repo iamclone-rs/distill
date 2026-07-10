@@ -14,25 +14,6 @@ from src.utils import get_all_categories
 from src.data_config import UNSEEN_CLASSES
 
 
-def print_run_config(args):
-    print(
-        "[Loss] CE + Triplet + relational KD(sketch, photo) -> "
-        f"cls={args.lambda_cls}, "
-        f"triplet={args.lambda_triplet}, "
-        f"kd={args.lambda_kd}, kd_temperature={args.kd_temperature}"
-    )
-    print(
-        "[Run] "
-        f"dataset={args.dataset}, teacher=DFN5B, "
-        f"joint_teacher_adapter={args.joint_teacher_adapter}, "
-        f"teacher_adapter_loss=triplet, "
-        f"teacher_triplet_margin={args.teacher_triplet_margin}, "
-        f"quantize_fp16={args.quantize_fp16}, "
-        f"teacher_adapter={args.teacher_adapter_ckpt or 'none'}, "
-        f"n_ctx={args.n_ctx}, epochs={args.epochs}, seed={args.seed}"
-    )
-
-
 def seed_everything(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -141,7 +122,6 @@ if __name__ == "__main__":
 
     
     args = parser.parse_args()
-    print_run_config(args)
     logger = TensorBoardLogger('tb_logs', name=args.exp_name)
     
     checkpoint_callback = ModelCheckpoint(
