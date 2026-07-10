@@ -14,6 +14,14 @@ from src.utils import get_all_categories
 from src.data_config import UNSEEN_CLASSES
 
 
+BENCHMARK_EPOCHS = {
+    "sketchy_1": 3,
+    "sketchy_2": 5,
+    "tuberlin": 10,
+    "quickdraw": 1,
+}
+
+
 def print_run_config(args):
     print(
         "[Loss] CE + Triplet + relational KD(sketch, photo) -> "
@@ -29,8 +37,23 @@ def print_run_config(args):
         f"teacher_triplet_margin={args.teacher_triplet_margin}, "
         f"quantize_fp16={args.quantize_fp16}, "
         f"teacher_adapter={args.teacher_adapter_ckpt or 'none'}, "
-        f"seed={args.seed}"
+        f"n_ctx={args.n_ctx}, epochs={args.epochs}, seed={args.seed}"
     )
+
+
+def apply_benchmark_defaults(args):
+    """Use the best teacher-adapter-triplet benchmark settings by default."""
+    if args.epochs is None:
+        args.epochs = BENCHMARK_EPOCHS[args.dataset]
+    if args.exp_name is None:
+        prefix = {
+            "sketchy_1": "sketchy1",
+            "sketchy_2": "sketchy2",
+            "tuberlin": "tuberlin",
+            "quickdraw": "quickdraw",
+        }[args.dataset]
+        args.exp_name = f"{prefix}_teacher_adapter_triplet_baseline"
+    return args
 
 
 def seed_everything(seed):
@@ -96,7 +119,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="sketchy_1",
                         choices=sorted(UNSEEN_CLASSES), help="zero-shot split")
     parser.add_argument("--backbone", type=str, default="ViT-B/32")
-    parser.add_argument("--n_ctx", type=int, default=1)
+    parser.add_argument("--n_ctx", type=int, default=2)
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
@@ -108,21 +131,28 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=4e-5)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--test_batch_size', type=int, default=1024)
-    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--epochs', type=int, default=None,
+                        help='Số epoch. Mặc định theo benchmark: sketchy_1=3, sketchy_2=5, tuberlin=10, quickdraw=1.')
     parser.add_argument('--workers', type=int, default=8)
-    parser.add_argument('--progress', action='store_true', default=False,
+    parser.add_argument('--progress', action='store_true', default=True,
                         help='Hiện tqdm progress bar trong lúc train')
-    parser.add_argument('--quantize_fp16', action='store_true', default=False,
+    parser.add_argument('--no_progress', action='store_false', dest='progress',
+                        help='Tắt tqdm progress bar.')
+    parser.add_argument('--quantize_fp16', action='store_true', default=True,
                         help='Chạy DFN5B teacher ở FP16 để giảm VRAM và tăng tốc.')
+    parser.add_argument('--no_quantize_fp16', action='store_false', dest='quantize_fp16',
+                        help='Giữ DFN5B teacher ở FP32.')
     parser.add_argument('--teacher_adapter_ckpt', type=str, default='',
                         help='Checkpoint modality adapter đã fine-tune cho DFN5B.')
-    parser.add_argument('--joint_teacher_adapter', action='store_true', default=False,
+    parser.add_argument('--joint_teacher_adapter', action='store_true', default=True,
                         help='Train DFN5B sketch/photo adapters jointly with the student.')
-    parser.add_argument('--teacher_adapter_bottleneck', type=int, default=32)
-    parser.add_argument('--teacher_adapter_lr', type=float, default=1e-4)
+    parser.add_argument('--no_joint_teacher_adapter', action='store_false', dest='joint_teacher_adapter',
+                        help='Tắt joint teacher adapter để chạy ablation/no-teacher.')
+    parser.add_argument('--teacher_adapter_bottleneck', type=int, default=64)
+    parser.add_argument('--teacher_adapter_lr', type=float, default=2e-5)
     parser.add_argument('--lambda_teacher_retrieval', type=float, default=1.0,
                         help='Trọng số teacher-adapter triplet loss trên nhánh ablation này.')
-    parser.add_argument('--lambda_teacher_semantic', type=float, default=0.5)
+    parser.add_argument('--lambda_teacher_semantic', type=float, default=1.0)
     parser.add_argument('--teacher_temperature', type=float, default=0.07)
     parser.add_argument('--teacher_triplet_margin', type=float, default=0.2)
     parser.add_argument('--lambda_kd', type=float, default=3.0,
@@ -130,11 +160,11 @@ if __name__ == "__main__":
     parser.add_argument('--kd_temperature', type=float, default=0.07,
                         help='Temperature cho phân phối similarity sketch-photo.')
                         
-    parser.add_argument('--exp_name', type=str, default='Co_prompt')
+    parser.add_argument('--exp_name', type=str, default=None)
 
 
     
-    args = parser.parse_args()
+    args = apply_benchmark_defaults(parser.parse_args())
     print_run_config(args)
     logger = TensorBoardLogger('tb_logs', name=args.exp_name)
     
