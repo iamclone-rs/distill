@@ -39,7 +39,10 @@ class MultiModalPromptLearner(nn.Module):
         self.clip_model = clip_model
         self.cfg = cfg
         n_ctx = cfg.n_ctx
-        ctx_init = "a photo/sketch of "
+        if type == "sketch":
+            ctx_init = "a sketch of a"
+        else:
+            ctx_init = "a photo of a"
             
         dtype = clip_model.dtype
         ctx_dim = clip_model.ln_final.weight.shape[0]
