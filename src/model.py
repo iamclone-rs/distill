@@ -8,9 +8,9 @@ from torchmetrics.functional import retrieval_average_precision #, retrieval_pre
 import open_clip
 
 from src.coprompt import MultiModalPromptLearner, TextEncoder
-from src.utils import load_clip_to_cpu, get_all_categories, retrieval_precision
+from src.utils import load_clip_to_cpu, retrieval_precision
 from src.losses import loss_fn
-from src.finetune_dfn5b_adapter import ModalityAdapters
+from src.teacher_adapters import ModalityAdapters
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -315,81 +315,6 @@ class CustomCLIP(nn.Module):
         return feature
 
 
-def _count_params(module, trainable_only=False):
-    return sum(
-        p.numel()
-        for p in module.parameters()
-        if (p.requires_grad or not trainable_only)
-    )
-
-
-def _fmt_params(num_params):
-    if num_params >= 1_000_000:
-        return f"{num_params / 1_000_000:.2f}M"
-    if num_params >= 1_000:
-        return f"{num_params / 1_000:.1f}K"
-    return str(num_params)
-
-
-def _prompt_local_params(prompt_learner):
-    total = prompt_learner.ctx.numel()
-    trainable = prompt_learner.ctx.numel() if prompt_learner.ctx.requires_grad else 0
-    total += _count_params(prompt_learner.proj)
-    trainable += _count_params(prompt_learner.proj, trainable_only=True)
-    return trainable, total
-
-
-def _grad_stats(module):
-    params_with_grad = 0
-    elems_with_grad = 0
-    grad_sq_sum = 0.0
-    for p in module.parameters():
-        if p.grad is None:
-            continue
-        grad = p.grad.detach().float()
-        grad_norm = grad.norm().item()
-        if grad_norm == 0.0:
-            continue
-        params_with_grad += 1
-        elems_with_grad += p.numel()
-        grad_sq_sum += grad_norm ** 2
-    return params_with_grad, elems_with_grad, grad_sq_sum ** 0.5
-
-
-def _prompt_local_grad_stats(prompt_learner):
-    params = [prompt_learner.ctx, *prompt_learner.proj.parameters()]
-    params_with_grad = 0
-    elems_with_grad = 0
-    grad_sq_sum = 0.0
-    for p in params:
-        if p.grad is None:
-            continue
-        grad = p.grad.detach().float()
-        grad_norm = grad.norm().item()
-        if grad_norm == 0.0:
-            continue
-        params_with_grad += 1
-        elems_with_grad += p.numel()
-        grad_sq_sum += grad_norm ** 2
-    return params_with_grad, elems_with_grad, grad_sq_sum ** 0.5
-
-
-def _tensor_debug(name, value):
-    if value is None:
-        return f"  {name:<28} None"
-    if not torch.is_tensor(value):
-        return f"  {name:<28} {type(value).__name__}"
-
-    text = (
-        f"  {name:<28} shape={tuple(value.shape)} "
-        f"dtype={value.dtype} grad={value.requires_grad}"
-    )
-    if value.ndim >= 2 and value.shape[-1] > 1:
-        with torch.no_grad():
-            norm = value.detach().float().norm(dim=-1).mean().item()
-        text += f" mean_norm={norm:.4f}"
-    return text
-            
 class ZS_SBIR(pl.LightningModule):
     def __init__(self, args, classname):
         super(ZS_SBIR, self).__init__()
@@ -416,70 +341,9 @@ class ZS_SBIR(pl.LightningModule):
             clip_model_distill=clip_model_distill,
             strong_teacher=strong_teacher,
         )
-        self._feature_debug_printed = False
-        self._grad_debug_printed = False
-        self._print_model_debug_summary()
-    
+
         self.val_step_outputs_sk = []
         self.val_step_outputs_ph = []
-
-    def _print_module_param_row(self, name, module):
-        total = _count_params(module)
-        trainable = _count_params(module, trainable_only=True)
-        print(
-            f"  {name:<24} trainable={_fmt_params(trainable):>8} / "
-            f"total={_fmt_params(total):>8}"
-        )
-
-    def _print_prompt_local_row(self, name, prompt_learner):
-        trainable, total = _prompt_local_params(prompt_learner)
-        print(
-            f"  {name:<24} trainable={_fmt_params(trainable):>8} / "
-            f"total={_fmt_params(total):>8}"
-        )
-
-    def _print_grad_row(self, name, module):
-        params_with_grad, elems_with_grad, grad_norm = _grad_stats(module)
-        print(
-            f"  {name:<24} grad_params={params_with_grad:>4} "
-            f"grad_elems={_fmt_params(elems_with_grad):>8} grad_norm={grad_norm:.4e}"
-        )
-
-    def _print_prompt_local_grad_row(self, name, prompt_learner):
-        params_with_grad, elems_with_grad, grad_norm = _prompt_local_grad_stats(prompt_learner)
-        print(
-            f"  {name:<24} grad_params={params_with_grad:>4} "
-            f"grad_elems={_fmt_params(elems_with_grad):>8} grad_norm={grad_norm:.4e}"
-        )
-
-    def _print_model_debug_summary(self):
-        print("=" * 78)
-        print("[CoPrompt Debug] Module parameter summary")
-        print("[CoPrompt Debug] Note: prompt_learner_* rows include its registered CLIP reference.")
-        self._print_module_param_row("CustomCLIP", self.model)
-        self._print_module_param_row("prompt_learner_photo", self.model.prompt_learner_photo)
-        self._print_module_param_row("prompt_learner_sketch", self.model.prompt_learner_sketch)
-        self._print_prompt_local_row("photo ctx+proj only", self.model.prompt_learner_photo)
-        self._print_prompt_local_row("sketch ctx+proj only", self.model.prompt_learner_sketch)
-        self._print_module_param_row("ph_encoder", self.model.ph_encoder)
-        self._print_module_param_row("sk_encoder", self.model.sk_encoder)
-        self._print_module_param_row("text_encoder", self.model.text_encoder)
-        if self.model.model_distill is not None:
-            self._print_module_param_row("model_distill", self.model.model_distill)
-        if self.model.teacher_adapters is not None:
-            self._print_module_param_row("teacher_adapters", self.model.teacher_adapters)
-        total_trainable = _count_params(self.model, trainable_only=True)
-        print(f"[CoPrompt Debug] Total trainable params: {_fmt_params(total_trainable)}")
-        print(
-            "[CoPrompt Debug] Loss weights: "
-            f"cls={getattr(self.args, 'lambda_cls', 1.0)}, "
-            f"triplet={getattr(self.args, 'lambda_triplet', 1.0)}, "
-            f"kd_sketch_photo={self.args.lambda_kd}, "
-            f"teacher_triplet={self.args.lambda_teacher_retrieval}, "
-            f"teacher_triplet_margin={self.args.teacher_triplet_margin}, "
-            f"teacher_semantic={self.args.lambda_teacher_semantic}"
-        )
-        print("=" * 78)
         
     def configure_optimizers(self):
         adapter_params = (
@@ -505,10 +369,10 @@ class ZS_SBIR(pl.LightningModule):
         )
         trainable = sum(p.numel() for group in optimizer.param_groups for p in group["params"] if p.requires_grad)
         print(
-            "[CoPrompt Debug] Optimizer: SGD "
+            "[Optimizer] SGD "
             f"lr={self.args.lr}, momentum=0.9, weight_decay=1e-3, "
             f"teacher_adapter_lr={self.args.teacher_adapter_lr if adapter_params else 'off'}, "
-            f"trainable_params={_fmt_params(trainable)}"
+            f"trainable_params={trainable:,}"
         )
         
         scheduler = torch.optim.lr_scheduler.StepLR(
@@ -523,34 +387,7 @@ class ZS_SBIR(pl.LightningModule):
         return self.model(data, classname)
     
     def training_step(self, batch, batch_idx):
-        classname = get_all_categories(self.args)
-        features = self.forward(batch, classname)
-        if (
-            not self._feature_debug_printed
-            and batch_idx == 0
-            and getattr(self.trainer, "is_global_zero", True)
-        ):
-            feature_names = [
-                "photo_features",
-                "sketch_features",
-                "teacher_photo_features",
-                "teacher_sketch_features",
-                "negative_features",
-                "label",
-                "photo_logits",
-                "sketch_logits",
-                "teacher_active",
-                "joint_teacher_adapter",
-                "teacher_sketch_text",
-                "teacher_photo_text",
-            ]
-            print("=" * 78)
-            print("[CoPrompt Debug] First train batch feature contract")
-            for name, value in zip(feature_names, features):
-                print(_tensor_debug(name, value))
-            print("=" * 78)
-            self._feature_debug_printed = True
-        
+        features = self.forward(batch, self.classname)
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
@@ -563,34 +400,14 @@ class ZS_SBIR(pl.LightningModule):
             bar_name = bar_names.get(k, k)
             self.log(bar_name, v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
         return loss
-
-    def on_after_backward(self):
-        if self._grad_debug_printed or not getattr(self.trainer, "is_global_zero", True):
-            return
-
-        print("=" * 78)
-        print("[CoPrompt Debug] First backward non-zero gradient summary")
-        self._print_grad_row("CustomCLIP", self.model)
-        self._print_prompt_local_grad_row("photo ctx+proj only", self.model.prompt_learner_photo)
-        self._print_prompt_local_grad_row("sketch ctx+proj only", self.model.prompt_learner_sketch)
-        self._print_grad_row("ph_encoder", self.model.ph_encoder)
-        self._print_grad_row("sk_encoder", self.model.sk_encoder)
-        self._print_grad_row("text_encoder", self.model.text_encoder)
-        if self.model.model_distill is not None:
-            self._print_grad_row("model_distill", self.model.model_distill)
-        if self.model.teacher_adapters is not None:
-            self._print_grad_row("teacher_adapters", self.model.teacher_adapters)
-        print("=" * 78)
-        self._grad_debug_printed = True
     
     def validation_step(self, batch, batch_idx, dataloader_idx):
-        classnames = get_all_categories(self.args)
         image_tensor, label = batch
         if dataloader_idx == 0:
-            feat = self.model.extract_feature(image_tensor, classname=classnames, type='sketch')
+            feat = self.model.extract_feature(image_tensor, classname=self.classname, type='sketch')
             self.val_step_outputs_sk.append((feat, label))
         else:
-            feat = self.model.extract_feature(image_tensor, classname=classnames, type='photo')
+            feat = self.model.extract_feature(image_tensor, classname=self.classname, type='photo')
             self.val_step_outputs_ph.append((feat, label))
 
     def on_validation_epoch_end(self):

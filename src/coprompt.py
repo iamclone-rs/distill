@@ -79,26 +79,7 @@ class MultiModalPromptLearner(nn.Module):
             self.proj.half()
         self.ctx = nn.Parameter(ctx_vectors)
 
-        self.n_ctx = n_ctx
-        
-    def construct_prompts(self, ctx, prefix, suffix, label=None):
-            
-        if label is not None:
-            prefix = prefix[label]
-            suffix = suffix[label]
-
-        prompts = torch.cat(
-            [
-                prefix,  # (dim0, 1, dim)
-                ctx,  # (dim0, n_ctx, dim)
-                suffix,  # (dim0, *, dim)
-            ],
-            dim=1,
-        )
-
-        return prompts
-
-    def forward(self, classnames, label=None):
+    def forward(self, classnames):
         n_cls = len(classnames)
         classnames = [name.replace("_", " ") for name in classnames]
         raw_prompts = [self.prompt_prefix + " " + name + "." for name in classnames]
@@ -116,8 +97,7 @@ class MultiModalPromptLearner(nn.Module):
 
         prefix = embedding[:, :1, :]
         suffix = embedding[:, 1 + self.cfg.n_ctx :, :]
-        
-        prompts = self.construct_prompts(ctx, prefix, suffix, label)
+        prompts = torch.cat([prefix, ctx, suffix], dim=1)
         
         return (
             tokenized_prompts,

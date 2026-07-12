@@ -157,18 +157,7 @@ if __name__ == "__main__":
         model = ZS_SBIR(args=args, classname=classnames)
     else:
         ckpt = torch.load(ckpt_path, map_location="cpu")
-        sd = ckpt["state_dict"]
-
-        skip = [
-            "model.prompt_learner_photo.token_prefix",
-            "model.prompt_learner_photo.token_suffix",
-            "model.prompt_learner_sketch.token_prefix",
-            "model.prompt_learner_sketch.token_suffix",
-        ]
-        for k in skip:
-            sd.pop(k, None)
-
-        model = ZS_SBIR(args=args, classname=classnames)  # classnames = 220
-        missing, unexpected = model.load_state_dict(sd, strict=False)
+        model = ZS_SBIR(args=args, classname=classnames)
+        model.load_state_dict(ckpt["state_dict"], strict=False)
 
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
